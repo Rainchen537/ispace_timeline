@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../state/app_session_controller.dart';
 import 'ispace_page.dart';
+import 'mail_page.dart';
 import 'placeholder_page.dart';
 import 'schedule_page.dart';
 import 'user_page.dart';
@@ -27,11 +28,8 @@ class _RootShellPageState extends State<RootShellPage> {
         icon: Icons.home_rounded,
         gradient: [Color(0xFF003049), Color(0xFF1D3557)],
       ),
-      const PlaceholderPage(
-        title: 'Life',
-        subtitle: '生活服务与校园资讯',
-        icon: Icons.explore_rounded,
-        gradient: [Color(0xFF006D77), Color(0xFF0A9396)],
+      MailPage(
+        controller: widget.controller,
       ),
       IspacePage(
         controller: widget.controller,
@@ -63,9 +61,9 @@ class _RootShellPageState extends State<RootShellPage> {
             label: 'home',
           ),
           NavigationDestination(
-            icon: Icon(Icons.landscape_outlined),
-            selectedIcon: Icon(Icons.landscape_rounded),
-            label: 'life',
+            icon: Icon(Icons.mail_outline_rounded),
+            selectedIcon: Icon(Icons.mail_rounded),
+            label: 'mail',
           ),
           NavigationDestination(
             icon: Icon(Icons.school_outlined),

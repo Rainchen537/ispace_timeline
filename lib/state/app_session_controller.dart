@@ -3,6 +3,7 @@ import 'package:flutter/services.dart';
 
 import '../models/course_content.dart';
 import '../models/course_summary.dart';
+import '../models/mail_models.dart';
 import '../models/recent_course.dart';
 import '../models/timetable_data.dart';
 import '../models/timeline_detail_data.dart';
@@ -13,11 +14,9 @@ import '../services/bnbu_mis_client.dart';
 import '../services/moodle_api_client.dart';
 
 class AppSessionController extends ChangeNotifier {
-  AppSessionController({
-    MoodleApiClient? apiClient,
-    BnbuMisClient? misClient,
-  }) : _apiClient = apiClient ?? MoodleApiClient(),
-       _misClient = misClient ?? BnbuMisClient();
+  AppSessionController({MoodleApiClient? apiClient, BnbuMisClient? misClient})
+    : _apiClient = apiClient ?? MoodleApiClient(),
+      _misClient = misClient ?? BnbuMisClient();
 
   static const MethodChannel _credentialStoreChannel = MethodChannel(
     'ispace/credential_store',
@@ -65,7 +64,19 @@ class AppSessionController extends ChangeNotifier {
   bool get isLoggedIn => _session != null;
   String? get error => _error;
   String? get timetableError => _timetableError;
+  String? get username => _username;
   String get baseUrl => _apiClient.baseUrl;
+
+  Future<MailAccessCredentials?> loadMailAccessCredentials() async {
+    final credentials = await _currentCredentials();
+    if (credentials == null) {
+      return null;
+    }
+    return MailAccessCredentials.fromUserId(
+      userId: credentials.$1,
+      password: credentials.$2,
+    );
+  }
 
   Future<void> login({
     required String username,

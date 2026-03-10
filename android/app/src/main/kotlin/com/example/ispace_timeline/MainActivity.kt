@@ -395,7 +395,17 @@ private class IspaceNativeWebView(
         cookieManager.flush()
 
         val initialUrl = (params["initialUrl"] as? String).orEmpty()
-        if (initialUrl.isNotBlank()) {
+        val htmlContent = (params["htmlContent"] as? String).orEmpty()
+        val baseUrl = (params["baseUrl"] as? String).orEmpty()
+        if (htmlContent.isNotBlank()) {
+            webView.loadDataWithBaseURL(
+                baseUrl.ifBlank { null },
+                htmlContent,
+                "text/html",
+                "utf-8",
+                null,
+            )
+        } else if (initialUrl.isNotBlank()) {
             webView.loadUrl(initialUrl)
         }
     }

@@ -32,7 +32,7 @@ void main() {
     );
 
     expect(find.text('home'), findsOneWidget);
-    expect(find.text('life'), findsOneWidget);
+    expect(find.text('mail'), findsOneWidget);
     expect(find.text('ispace'), findsOneWidget);
     expect(find.text('schedule'), findsOneWidget);
     expect(find.text('user'), findsOneWidget);

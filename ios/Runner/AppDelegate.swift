@@ -395,9 +395,9 @@ final class IspaceNativeWebView: NSObject, FlutterPlatformView {
       return
     }
     let initialUrl = (params["initialUrl"] as? String) ?? ""
-    guard let initial = URL(string: initialUrl) else {
-      return
-    }
+    let htmlContent = (params["htmlContent"] as? String) ?? ""
+    let baseUrlString = (params["baseUrl"] as? String) ?? ""
+    let initial = URL(string: initialUrl)
     let cookieStore = webView.configuration.websiteDataStore.httpCookieStore
     let rawCookies = (params["cookies"] as? [[String: Any]]) ?? []
 
@@ -424,7 +424,7 @@ final class IspaceNativeWebView: NSObject, FlutterPlatformView {
       if let cleanedDomain, !cleanedDomain.isEmpty {
         properties[.domain] = cleanedDomain
       } else {
-        properties[.domain] = initial.host ?? "ispace.uic.edu.cn"
+        properties[.domain] = initial?.host ?? "mail.bnbu.edu.cn"
       }
       properties[.secure] = "TRUE"
 
@@ -439,6 +439,12 @@ final class IspaceNativeWebView: NSObject, FlutterPlatformView {
 
     group.notify(queue: .main) { [weak self] in
       guard let self else { return }
+      if !htmlContent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+        let baseUrl = URL(string: baseUrlString)
+        self.webView.loadHTMLString(htmlContent, baseURL: baseUrl)
+        return
+      }
+      guard let initial else { return }
       self.webView.load(URLRequest(url: initial))
     }
   }

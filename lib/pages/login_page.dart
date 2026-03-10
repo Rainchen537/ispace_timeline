@@ -270,7 +270,7 @@ class _LoginPageState extends State<LoginPage> {
           ),
           children: const [
             TextSpan(
-              text: '感谢您使用掌上BNBU（内测版本）\n',
+              text: '感谢您使用掌上BNBU\n',
               style: TextStyle(
                 color: Color(0xFF5B6676),
                 fontWeight: FontWeight.w700,
