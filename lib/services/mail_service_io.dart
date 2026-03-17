@@ -68,7 +68,7 @@ class _IoMailService implements MailService {
 
       final messages = await client.fetchMessages(
         count: effectiveEnd - effectiveStart + 1,
-        fetchPreference: FetchPreference.fullWhenWithinSize,
+        fetchPreference: FetchPreference.envelope,
       );
       
       final validMessages = messages
@@ -105,6 +105,7 @@ class _IoMailService implements MailService {
     required MailAccessCredentials credentials,
     required String query,
     MailFolder folder = MailFolder.inbox,
+    MailSearchScope searchScope = MailSearchScope.subject,
   }) async {
     try {
       final client = await _ensureConnected(credentials);
@@ -114,7 +115,7 @@ class _IoMailService implements MailService {
       // Use MailSearch for high-level searching
       final search = MailSearch(
         query,
-        SearchQueryType.subject,
+        _mapSearchScope(searchScope),
         pageSize: 50,
       );
 
@@ -233,6 +234,96 @@ class _IoMailService implements MailService {
   }
 
   @override
+  Future<void> deleteMessages({
+    required MailAccessCredentials credentials,
+    required MailFolder folder,
+    required List<int> uids,
+  }) async {
+    if (uids.isEmpty) return;
+    try {
+      final client = await _ensureConnected(credentials);
+      // Ensure mailbox list is cached so deleteMessages can locate the trash folder
+      if (client.mailboxes == null) {
+        await client.listMailboxes();
+      }
+      await client.selectMailboxByPath(_mapFolderToPath(folder));
+      final sequence = MessageSequence.fromIds(uids, isUid: true);
+      await client.deleteMessages(sequence, expunge: false);
+      for (final uid in uids) {
+        _messageCache.remove(uid);
+      }
+    } catch (error) {
+      throw _mapError(error);
+    }
+  }
+
+  @override
+  Future<int?> saveDraft({
+    required MailAccessCredentials credentials,
+    required MailComposeData composeData,
+    int? existingDraftUid,
+  }) async {
+    try {
+      final client = await _ensureConnected(credentials);
+
+      // Delete old draft if exists
+      if (existingDraftUid != null) {
+        try {
+          await client.selectMailboxByPath(_mapFolderToPath(MailFolder.drafts));
+          await client.deleteMessages(
+            MessageSequence.fromIds([existingDraftUid], isUid: true),
+            expunge: true,
+          );
+          _messageCache.remove(existingDraftUid);
+        } catch (_) {
+          // best-effort
+        }
+      }
+
+      // Build message
+      final builder = MessageBuilder.prepareMultipartMixedMessage();
+      builder.from = [MailAddress(null, credentials.emailAddress)];
+      if (composeData.to.isNotEmpty) {
+        builder.to = [MailAddress(null, composeData.to)];
+      }
+      if (composeData.cc != null && composeData.cc!.isNotEmpty) {
+        builder.cc = [MailAddress(null, composeData.cc!)];
+      }
+      builder.subject = composeData.subject;
+      builder.addTextPlain(composeData.body);
+      if (composeData.inReplyTo != null) {
+        builder.addHeader('In-Reply-To', composeData.inReplyTo!);
+      }
+      if (composeData.references != null) {
+        builder.addHeader('References', composeData.references!);
+      }
+      final mimeMessage = builder.buildMimeMessage();
+
+      // Append to Drafts
+      UidResponseCode? uidResponse;
+      try {
+        uidResponse = await client.appendMessageToFlag(
+          mimeMessage,
+          MailboxFlag.drafts,
+          flags: [MessageFlags.draft, MessageFlags.seen],
+        );
+      } catch (_) {
+        // Fallback: select Drafts by path and append
+        final draftsMailbox = await client.selectMailboxByPath('Drafts');
+        uidResponse = await client.appendMessage(
+          mimeMessage,
+          draftsMailbox,
+          flags: [MessageFlags.draft, MessageFlags.seen],
+        );
+      }
+
+      return uidResponse?.targetSequence.toList(null).firstOrNull;
+    } catch (error) {
+      throw _mapError(error);
+    }
+  }
+
+  @override
   Future<void> close() async {
     _messageCache.clear();
     _activeCredentials = null;
@@ -275,6 +366,17 @@ class _IoMailService implements MailService {
     _client = nextClient;
     _activeCredentials = credentials;
     return nextClient;
+  }
+
+  SearchQueryType _mapSearchScope(MailSearchScope scope) {
+    switch (scope) {
+      case MailSearchScope.subject:
+        return SearchQueryType.subject;
+      case MailSearchScope.from:
+        return SearchQueryType.from;
+      case MailSearchScope.to:
+        return SearchQueryType.to;
+    }
   }
 
   String _mapFolderToPath(MailFolder folder) {
@@ -340,6 +442,7 @@ class _IoMailService implements MailService {
       htmlBody: htmlBody.isEmpty ? null : htmlBody,
       isSeen: message.isSeen,
       attachments: attachments,
+      messageId: message.getHeaderValue('Message-Id'),
     );
   }
 
