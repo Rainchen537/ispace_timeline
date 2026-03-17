@@ -15,6 +15,10 @@ class _MockMailService implements MailService {
   int? savedDraftUid;
   MailComposeData? sentData;
 
+  // Capture last searchFolder call for assertions
+  String? lastSearchQuery;
+  MailSearchScope? lastSearchScope;
+
   _MockMailService({
     List<MailMessageSummary>? inbox,
     List<MailMessageSummary>? drafts,
@@ -73,9 +77,12 @@ class _MockMailService implements MailService {
     required MailAccessCredentials credentials,
     required String query,
     MailFolder folder = MailFolder.inbox,
-    MailSearchScope searchScope = MailSearchScope.subject,
-  }) async =>
-      [];
+    MailSearchScope searchScope = MailSearchScope.allText,
+  }) async {
+    lastSearchQuery = query;
+    lastSearchScope = searchScope;
+    return [];
+  }
 
   @override
   Future<void> sendEmail({
@@ -321,6 +328,234 @@ void main() {
           reason: 'Draft taps should NOT open detail page');
       expect(find.text('发件人：'), findsOneWidget,
           reason: 'Draft taps SHOULD open compose page');
+    });
+  });
+
+  // ── Test 4: Search scope behavior ─────────────────────────────────────────
+
+  group('Search scope behavior', () {
+    testWidgets('scope chips hidden when search bar is empty', (tester) async {
+      final svc = _MockMailService();
+      await tester.pumpWidget(
+        _wrapInApp(
+          MailPage.withService(
+            controller: null,
+            mailService: svc,
+            testCredentials: _creds(),
+          ),
+        ),
+      );
+      await tester.pump();
+
+      expect(find.text('仅主题'), findsNothing);
+      expect(find.text('按发件人'), findsNothing);
+      expect(find.text('按收件人'), findsNothing);
+    });
+
+    testWidgets('scope chips appear when search bar has text', (tester) async {
+      final svc = _MockMailService();
+      await tester.pumpWidget(
+        _wrapInApp(
+          MailPage.withService(
+            controller: null,
+            mailService: svc,
+            testCredentials: _creds(),
+          ),
+        ),
+      );
+      await tester.pump();
+
+      // Find the search TextField (first one in the widget tree)
+      await tester.enterText(
+        find.byWidgetPredicate(
+          (w) => w is TextField && w.decoration?.hintText == '搜索',
+        ),
+        'hello',
+      );
+      await tester.pump();
+
+      expect(find.text('仅主题'), findsOneWidget);
+      expect(find.text('按发件人'), findsOneWidget);
+      expect(find.text('按收件人'), findsOneWidget);
+    });
+
+    testWidgets('default scope uses allText (no secondary input visible)',
+        (tester) async {
+      final svc = _MockMailService();
+      await tester.pumpWidget(
+        _wrapInApp(
+          MailPage.withService(
+            controller: null,
+            mailService: svc,
+            testCredentials: _creds(),
+          ),
+        ),
+      );
+      await tester.pump();
+
+      await tester.enterText(
+        find.byWidgetPredicate(
+          (w) => w is TextField && w.decoration?.hintText == '搜索',
+        ),
+        'hello',
+      );
+      await tester.pump();
+
+      // No secondary "发件人邮箱：" or "收件人邮箱：" input should appear
+      expect(find.text('发件人邮箱：'), findsNothing);
+      expect(find.text('收件人邮箱：'), findsNothing);
+    });
+
+    testWidgets('按发件人 chip shows secondary sender input field',
+        (tester) async {
+      final svc = _MockMailService();
+      await tester.pumpWidget(
+        _wrapInApp(
+          MailPage.withService(
+            controller: null,
+            mailService: svc,
+            testCredentials: _creds(),
+          ),
+        ),
+      );
+      await tester.pump();
+
+      // Open search
+      await tester.enterText(
+        find.byWidgetPredicate(
+          (w) => w is TextField && w.decoration?.hintText == '搜索',
+        ),
+        'hello',
+      );
+      await tester.pump();
+
+      // Tap 按发件人
+      await tester.tap(find.text('按发件人'));
+      await tester.pump();
+
+      // Secondary sender input should appear
+      expect(find.text('发件人邮箱：'), findsOneWidget,
+          reason: '按发件人 chip must show a secondary sender input');
+      expect(find.text('收件人邮箱：'), findsNothing);
+    });
+
+    testWidgets('按收件人 chip shows secondary recipient input field',
+        (tester) async {
+      final svc = _MockMailService();
+      await tester.pumpWidget(
+        _wrapInApp(
+          MailPage.withService(
+            controller: null,
+            mailService: svc,
+            testCredentials: _creds(),
+          ),
+        ),
+      );
+      await tester.pump();
+
+      await tester.enterText(
+        find.byWidgetPredicate(
+          (w) => w is TextField && w.decoration?.hintText == '搜索',
+        ),
+        'hello',
+      );
+      await tester.pump();
+
+      await tester.tap(find.text('按收件人'));
+      await tester.pump();
+
+      expect(find.text('收件人邮箱：'), findsOneWidget,
+          reason: '按收件人 chip must show a secondary recipient input');
+      expect(find.text('发件人邮箱：'), findsNothing);
+    });
+
+    testWidgets(
+        '按发件人 chip stays visible even when main search bar is cleared',
+        (tester) async {
+      final svc = _MockMailService();
+      await tester.pumpWidget(
+        _wrapInApp(
+          MailPage.withService(
+            controller: null,
+            mailService: svc,
+            testCredentials: _creds(),
+          ),
+        ),
+      );
+      await tester.pump();
+
+      final searchField = find.byWidgetPredicate(
+        (w) => w is TextField && w.decoration?.hintText == '搜索',
+      );
+
+      await tester.enterText(searchField, 'hello');
+      await tester.pump();
+      await tester.tap(find.text('按发件人'));
+      await tester.pump();
+
+      // Clear the main search bar
+      await tester.enterText(searchField, '');
+      await tester.pump();
+
+      // Scope chips and sender input should still be visible
+      expect(find.text('发件人邮箱：'), findsOneWidget,
+          reason: 'Sender input must remain visible when 按发件人 is active');
+    });
+
+    testWidgets('default search triggers with allText scope', (tester) async {
+      final svc = _MockMailService();
+      await tester.pumpWidget(
+        _wrapInApp(
+          MailPage.withService(
+            controller: null,
+            mailService: svc,
+            testCredentials: _creds(),
+          ),
+        ),
+      );
+      await tester.pump();
+
+      await tester.enterText(
+        find.byWidgetPredicate(
+          (w) => w is TextField && w.decoration?.hintText == '搜索',
+        ),
+        'hello',
+      );
+      // Advance past debounce
+      await tester.pump(const Duration(milliseconds: 600));
+      await tester.pumpAndSettle();
+
+      expect(svc.lastSearchScope, equals(MailSearchScope.allText),
+          reason: 'Default search must use allText scope');
+      expect(svc.lastSearchQuery, equals('hello'));
+    });
+
+    testWidgets('仅主题 chip triggers subject-scoped search', (tester) async {
+      final svc = _MockMailService();
+      await tester.pumpWidget(
+        _wrapInApp(
+          MailPage.withService(
+            controller: null,
+            mailService: svc,
+            testCredentials: _creds(),
+          ),
+        ),
+      );
+      await tester.pump();
+
+      final searchField = find.byWidgetPredicate(
+        (w) => w is TextField && w.decoration?.hintText == '搜索',
+      );
+      await tester.enterText(searchField, 'test query');
+      await tester.pump(const Duration(milliseconds: 600));
+      await tester.pumpAndSettle();
+
+      // Now tap 仅主题
+      await tester.tap(find.text('仅主题'));
+      await tester.pumpAndSettle();
+
+      expect(svc.lastSearchScope, equals(MailSearchScope.subject),
+          reason: '仅主题 chip must switch scope to subject');
     });
   });
 }
