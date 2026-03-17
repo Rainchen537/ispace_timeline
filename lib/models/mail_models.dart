@@ -22,6 +22,29 @@ class MailAccessCredentials {
   final String password;
 }
 
+enum MailFolder {
+  inbox,
+  sent,
+  drafts,
+  trash,
+}
+
+class MailAttachment {
+  const MailAttachment({
+    required this.name,
+    required this.size,
+    required this.mimeType,
+    this.contentId,
+    this.partId,
+  });
+
+  final String name;
+  final int size;
+  final String mimeType;
+  final String? contentId;
+  final String? partId;
+}
+
 class MailMessageSummary {
   const MailMessageSummary({
     required this.uid,
@@ -31,6 +54,7 @@ class MailMessageSummary {
     required this.hasHtmlBody,
     required this.date,
     required this.isSeen,
+    this.hasAttachments = false,
   });
 
   final int uid;
@@ -40,6 +64,7 @@ class MailMessageSummary {
   final bool hasHtmlBody;
   final DateTime? date;
   final bool isSeen;
+  final bool hasAttachments;
 
   MailMessageSummary copyWith({
     int? uid,
@@ -49,6 +74,7 @@ class MailMessageSummary {
     bool? hasHtmlBody,
     DateTime? date,
     bool? isSeen,
+    bool? hasAttachments,
   }) {
     return MailMessageSummary(
       uid: uid ?? this.uid,
@@ -58,6 +84,7 @@ class MailMessageSummary {
       hasHtmlBody: hasHtmlBody ?? this.hasHtmlBody,
       date: date ?? this.date,
       isSeen: isSeen ?? this.isSeen,
+      hasAttachments: hasAttachments ?? this.hasAttachments,
     );
   }
 }
@@ -73,6 +100,7 @@ class MailMessageDetail {
     required this.body,
     required this.htmlBody,
     required this.isSeen,
+    this.attachments = const [],
   });
 
   final int uid;
@@ -84,15 +112,20 @@ class MailMessageDetail {
   final String body;
   final String? htmlBody;
   final bool isSeen;
+  final List<MailAttachment> attachments;
 }
 
-class MailInboxSnapshot {
-  const MailInboxSnapshot({
+class MailFolderSnapshot {
+  const MailFolderSnapshot({
     required this.emailAddress,
     required this.incomingServer,
     required this.outgoingServer,
     required this.messages,
     required this.fetchedAt,
+    required this.folder,
+    required this.totalMessages,
+    required this.currentPage,
+    required this.pageSize,
   });
 
   final String emailAddress;
@@ -100,22 +133,52 @@ class MailInboxSnapshot {
   final String outgoingServer;
   final List<MailMessageSummary> messages;
   final DateTime fetchedAt;
+  final MailFolder folder;
+  final int totalMessages;
+  final int currentPage;
+  final int pageSize;
 
   int get unreadCount => messages.where((message) => !message.isSeen).length;
 
-  MailInboxSnapshot copyWith({
+  MailFolderSnapshot copyWith({
     String? emailAddress,
     String? incomingServer,
     String? outgoingServer,
     List<MailMessageSummary>? messages,
     DateTime? fetchedAt,
+    MailFolder? folder,
+    int? totalMessages,
+    int? currentPage,
+    int? pageSize,
   }) {
-    return MailInboxSnapshot(
+    return MailFolderSnapshot(
       emailAddress: emailAddress ?? this.emailAddress,
       incomingServer: incomingServer ?? this.incomingServer,
       outgoingServer: outgoingServer ?? this.outgoingServer,
       messages: messages ?? this.messages,
       fetchedAt: fetchedAt ?? this.fetchedAt,
+      folder: folder ?? this.folder,
+      totalMessages: totalMessages ?? this.totalMessages,
+      currentPage: currentPage ?? this.currentPage,
+      pageSize: pageSize ?? this.pageSize,
     );
   }
+}
+
+class MailComposeData {
+  const MailComposeData({
+    required this.to,
+    this.cc,
+    required this.subject,
+    required this.body,
+    this.inReplyTo,
+    this.references,
+  });
+
+  final String to;
+  final String? cc;
+  final String subject;
+  final String body;
+  final String? inReplyTo;
+  final String? references;
 }

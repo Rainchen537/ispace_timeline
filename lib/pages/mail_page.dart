@@ -24,7 +24,7 @@ class _MailPageState extends State<MailPage> {
   final DateFormat _detailTimeFormat = DateFormat('yyyy-MM-dd HH:mm');
 
   MailAccessCredentials? _credentials;
-  MailInboxSnapshot? _snapshot;
+  MailFolderSnapshot? _snapshot;
   String? _errorMessage;
   bool _isLoading = false;
   bool _showUnreadOnly = false;
@@ -58,7 +58,7 @@ class _MailPageState extends State<MailPage> {
       if (credentials == null) {
         throw const MailServiceException('请先登录后再读取邮箱。');
       }
-      final snapshot = await _mailService.fetchInbox(credentials: credentials);
+      final snapshot = await _mailService.fetchFolder(credentials: credentials);
       if (!mounted) {
         return;
       }
@@ -324,7 +324,7 @@ class _MailPageState extends State<MailPage> {
 
   Widget _buildBody(
     BuildContext context,
-    MailInboxSnapshot? snapshot,
+    MailFolderSnapshot? snapshot,
     List<MailMessageSummary> visibleMessages,
   ) {
     if (_isLoading && snapshot == null) {

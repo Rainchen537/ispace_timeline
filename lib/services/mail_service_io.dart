@@ -19,34 +19,116 @@ class _IoMailService implements MailService {
   final Map<int, MimeMessage> _messageCache = <int, MimeMessage>{};
 
   @override
-  Future<MailInboxSnapshot> fetchInbox({
+  Future<MailFolderSnapshot> fetchFolder({
     required MailAccessCredentials credentials,
-    int limit = 25,
+    MailFolder folder = MailFolder.inbox,
+    int page = 1,
+    int pageSize = 25,
   }) async {
     try {
       final client = await _ensureConnected(credentials);
-      await client.selectInbox();
+      final folderPath = _mapFolderToPath(folder);
+      final mailFolder = await client.selectMailboxByPath(folderPath);
+      
+      final totalMessages = mailFolder.messagesExists;
+      if (totalMessages == 0) {
+        return MailFolderSnapshot(
+          emailAddress: credentials.emailAddress,
+          incomingServer: _incomingServer,
+          outgoingServer: _outgoingServer,
+          messages: const [],
+          fetchedAt: DateTime.now(),
+          folder: folder,
+          totalMessages: 0,
+          currentPage: page,
+          pageSize: pageSize,
+        );
+      }
+
+      // Calculate range for pagination (descending order)
+      final end = totalMessages - ((page - 1) * pageSize);
+      final start = totalMessages - (page * pageSize) + 1;
+      
+      final effectiveEnd = end < 1 ? 0 : end;
+      final effectiveStart = start < 1 ? 1 : start;
+
+      if (effectiveEnd < effectiveStart) {
+        return MailFolderSnapshot(
+          emailAddress: credentials.emailAddress,
+          incomingServer: _incomingServer,
+          outgoingServer: _outgoingServer,
+          messages: const [],
+          fetchedAt: DateTime.now(),
+          folder: folder,
+          totalMessages: totalMessages,
+          currentPage: page,
+          pageSize: pageSize,
+        );
+      }
+
       final messages = await client.fetchMessages(
-        count: limit,
+        count: effectiveEnd - effectiveStart + 1,
         fetchPreference: FetchPreference.fullWhenWithinSize,
       );
+      
       final validMessages = messages
           .where((message) => message.uid != null)
           .toList(growable: false)
         ..sort(_sortMessagesDesc);
-      _messageCache
-        ..clear()
-        ..addEntries(
-          validMessages.map((message) => MapEntry(message.uid!, message)),
-        );
+      
+      // Update cache
+      if (page == 1) {
+        _messageCache.clear();
+      }
+      _messageCache.addEntries(
+        validMessages.map((message) => MapEntry(message.uid!, message)),
+      );
 
-      return MailInboxSnapshot(
+      return MailFolderSnapshot(
         emailAddress: credentials.emailAddress,
         incomingServer: _incomingServer,
         outgoingServer: _outgoingServer,
         messages: validMessages.map(_toSummary).toList(growable: false),
         fetchedAt: DateTime.now(),
+        folder: folder,
+        totalMessages: totalMessages,
+        currentPage: page,
+        pageSize: pageSize,
       );
+    } catch (error) {
+      throw _mapError(error);
+    }
+  }
+
+  @override
+  Future<List<MailMessageSummary>> searchFolder({
+    required MailAccessCredentials credentials,
+    required String query,
+    MailFolder folder = MailFolder.inbox,
+  }) async {
+    try {
+      final client = await _ensureConnected(credentials);
+      final folderPath = _mapFolderToPath(folder);
+      await client.selectMailboxByPath(folderPath);
+
+      // Use MailSearch for high-level searching
+      final search = MailSearch(
+        query,
+        SearchQueryType.subject,
+        pageSize: 50,
+      );
+
+      final result = await client.searchMessages(search);
+      
+      final List<MimeMessage> messages = result.messages;
+      
+      final summaries = messages
+          .where((m) => m.uid != null)
+          .map(_toSummary)
+          .toList(growable: false)
+        ..sort(_sortSummariesDesc);
+
+      return summaries;
     } catch (error) {
       throw _mapError(error);
     }
@@ -59,24 +141,92 @@ class _IoMailService implements MailService {
   }) async {
     try {
       final client = await _ensureConnected(credentials);
-      await client.selectInbox();
+      // Ensure folder is selected (default to Inbox if not cached)
       var message = _messageCache[uid];
       if (message == null) {
-        await fetchInbox(credentials: credentials);
+        await fetchFolder(credentials: credentials);
         message = _messageCache[uid];
       }
       if (message == null) {
-        throw const MailServiceException('未找到这封邮件，请先刷新收件箱后重试。');
+        throw const MailServiceException('未找到这封邮件，请先刷新后重试。');
       }
 
       final loadedMessage = await client.fetchMessageContents(
         message,
         markAsSeen: true,
-        includedInlineTypes: const [MediaToptype.text],
+        includedInlineTypes: const [MediaToptype.text, MediaToptype.image],
       );
       loadedMessage.isSeen = true;
       _messageCache[uid] = loadedMessage;
       return _toDetail(loadedMessage);
+    } catch (error) {
+      throw _mapError(error);
+    }
+  }
+
+  @override
+  Future<List<int>> downloadAttachment({
+    required MailAccessCredentials credentials,
+    required int uid,
+    required String partId,
+  }) async {
+    try {
+      final client = await _ensureConnected(credentials);
+      var message = _messageCache[uid];
+      if (message == null) {
+        await fetchFolder(credentials: credentials);
+        message = _messageCache[uid];
+      }
+      if (message == null) {
+        throw const MailServiceException('未找到这封邮件，请先刷新后重试。');
+      }
+
+      final index = int.tryParse(partId);
+      if (index == null || index < 0) {
+        throw const MailServiceException('附件参数错误。');
+      }
+
+      final allParts = message.allPartsFlat;
+      if (index >= allParts.length) {
+        throw const MailServiceException('未找到该附件。');
+      }
+
+      final part = allParts[index];
+      // Force fetch full content if not already available
+      await client.fetchMessageContents(message);
+      
+      return part.decodeContentBinary() ?? const [];
+    } catch (error) {
+      throw _mapError(error);
+    }
+  }
+
+  @override
+  Future<void> sendEmail({
+    required MailAccessCredentials credentials,
+    required MailComposeData composeData,
+  }) async {
+    try {
+      final client = await _ensureConnected(credentials);
+      
+      final builder = MessageBuilder.prepareMultipartMixedMessage();
+      builder.from = [MailAddress(null, credentials.emailAddress)];
+      builder.to = [MailAddress(null, composeData.to)];
+      if (composeData.cc != null && composeData.cc!.isNotEmpty) {
+        builder.cc = [MailAddress(null, composeData.cc!)];
+      }
+      builder.subject = composeData.subject;
+      builder.addTextPlain(composeData.body);
+      
+      if (composeData.inReplyTo != null) {
+        builder.addHeader('In-Reply-To', composeData.inReplyTo!);
+      }
+      if (composeData.references != null) {
+        builder.addHeader('References', composeData.references!);
+      }
+
+      final mimeMessage = builder.buildMimeMessage();
+      await client.sendMessage(mimeMessage);
     } catch (error) {
       throw _mapError(error);
     }
@@ -127,6 +277,19 @@ class _IoMailService implements MailService {
     return nextClient;
   }
 
+  String _mapFolderToPath(MailFolder folder) {
+    switch (folder) {
+      case MailFolder.inbox:
+        return 'INBOX';
+      case MailFolder.sent:
+        return 'Sent Messages';
+      case MailFolder.drafts:
+        return 'Drafts';
+      case MailFolder.trash:
+        return 'Deleted Messages';
+    }
+  }
+
   MailMessageSummary _toSummary(MimeMessage message) {
     final plainText = _extractPlainText(message);
     final htmlBody = _extractHtmlSource(message);
@@ -138,6 +301,7 @@ class _IoMailService implements MailService {
       hasHtmlBody: htmlBody.isNotEmpty,
       date: message.decodeDate(),
       isSeen: message.isSeen,
+      hasAttachments: message.hasAttachments(),
     );
   }
 
@@ -146,6 +310,23 @@ class _IoMailService implements MailService {
     final cc = _joinAddresses(message.cc);
     final plainText = _extractPlainText(message);
     final htmlBody = _buildRenderableHtml(message);
+    
+    final attachments = <MailAttachment>[];
+    final allParts = message.allPartsFlat;
+    for (var i = 0; i < allParts.length; i++) {
+      final part = allParts[i];
+      final contentDisposition = part.decodeHeaderValue('Content-Disposition')?.toLowerCase() ?? '';
+      if (contentDisposition.contains('attachment')) {
+        attachments.add(MailAttachment(
+          name: part.decodeFileName() ?? '未命名附件',
+          size: 0, 
+          mimeType: part.decodeHeaderValue('Content-Type') ?? 'application/octet-stream',
+          contentId: part.decodeHeaderValue('Content-ID'),
+          partId: i.toString(),
+        ));
+      }
+    }
+
     return MailMessageDetail(
       uid: message.uid ?? 0,
       subject: _resolvedSubject(message),
@@ -158,6 +339,7 @@ class _IoMailService implements MailService {
           : _extractReadableText(message),
       htmlBody: htmlBody.isEmpty ? null : htmlBody,
       isSeen: message.isSeen,
+      attachments: attachments,
     );
   }
 
@@ -168,6 +350,15 @@ class _IoMailService implements MailService {
       return rightDate.compareTo(leftDate);
     }
     return (right.uid ?? 0).compareTo(left.uid ?? 0);
+  }
+
+  int _sortSummariesDesc(MailMessageSummary left, MailMessageSummary right) {
+    final leftDate = left.date;
+    final rightDate = right.date;
+    if (leftDate != null && rightDate != null) {
+      return rightDate.compareTo(leftDate);
+    }
+    return right.uid.compareTo(left.uid);
   }
 
   String _resolvedSubject(MimeMessage message) {

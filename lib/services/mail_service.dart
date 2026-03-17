@@ -1,9 +1,11 @@
 import '../models/mail_models.dart';
 
 abstract class MailService {
-  Future<MailInboxSnapshot> fetchInbox({
+  Future<MailFolderSnapshot> fetchFolder({
     required MailAccessCredentials credentials,
-    int limit = 25,
+    MailFolder folder = MailFolder.inbox,
+    int page = 1,
+    int pageSize = 25,
   });
 
   Future<MailMessageDetail> readMessage({
