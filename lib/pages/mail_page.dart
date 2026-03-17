@@ -38,6 +38,8 @@ class _MailPageState extends State<MailPage> {
   late final MailService _mailService =
       widget._mailService ?? createMailService();
   final TextEditingController _searchController = TextEditingController();
+  final TextEditingController _senderController = TextEditingController();
+  final TextEditingController _recipientController = TextEditingController();
   final ScrollController _scrollController = ScrollController();
   final DateFormat _detailTimeFormat = DateFormat('yyyy-MM-dd HH:mm');
 
@@ -50,13 +52,18 @@ class _MailPageState extends State<MailPage> {
   int? _openingMessageUid;
   String _searchQuery = '';
   MailFolder _currentFolder = MailFolder.inbox;
-  MailSearchScope _searchScope = MailSearchScope.subject;
+  MailSearchScope _searchScope = MailSearchScope.allText;
   bool _isSearching = false;
   List<MailMessageSummary>? _searchResults;
   Timer? _searchDebounce;
   bool _isMultiSelectMode = false;
   final Set<int> _selectedUids = {};
   bool _isDeleting = false;
+
+  bool get _showScopeArea =>
+      _searchQuery.isNotEmpty ||
+      _searchScope == MailSearchScope.from ||
+      _searchScope == MailSearchScope.to;
 
   @override
   void initState() {
@@ -70,6 +77,8 @@ class _MailPageState extends State<MailPage> {
   @override
   void dispose() {
     _searchController.dispose();
+    _senderController.dispose();
+    _recipientController.dispose();
     _scrollController.dispose();
     _searchDebounce?.cancel();
     unawaited(_mailService.close());
@@ -93,10 +102,13 @@ class _MailPageState extends State<MailPage> {
   Future<void> _refreshFolder() async {
     if (_isLoading) return;
     _searchDebounce?.cancel();
+    _senderController.clear();
+    _recipientController.clear();
     setState(() {
       _isLoading = true;
       _errorMessage = null;
       _searchResults = null;
+      _searchScope = MailSearchScope.allText;
       _isMultiSelectMode = false;
       _selectedUids.clear();
     });
@@ -165,18 +177,64 @@ class _MailPageState extends State<MailPage> {
     _searchDebounce?.cancel();
     setState(() {
       _searchQuery = value;
-      if (value.isEmpty) {
+      // Only clear results if we're not in from/to mode (those have their own inputs)
+      if (value.isEmpty &&
+          _searchScope != MailSearchScope.from &&
+          _searchScope != MailSearchScope.to) {
         _searchResults = null;
         _isSearching = false;
       }
     });
+    // from/to scopes use the secondary input, not the main bar
+    if (_searchScope == MailSearchScope.from ||
+        _searchScope == MailSearchScope.to) {
+      return;
+    }
     if (value.trim().isEmpty) return;
     _searchDebounce = Timer(const Duration(milliseconds: 500), _runSearch);
   }
 
+  void _onSenderChanged(String value) {
+    _searchDebounce?.cancel();
+    if (value.trim().isEmpty) {
+      setState(() {
+        _searchResults = null;
+        _isSearching = false;
+      });
+      return;
+    }
+    _searchDebounce = Timer(const Duration(milliseconds: 500), _runSearch);
+  }
+
+  void _onRecipientChanged(String value) {
+    _searchDebounce?.cancel();
+    if (value.trim().isEmpty) {
+      setState(() {
+        _searchResults = null;
+        _isSearching = false;
+      });
+      return;
+    }
+    _searchDebounce = Timer(const Duration(milliseconds: 500), _runSearch);
+  }
+
   Future<void> _runSearch() async {
-    final query = _searchQuery.trim();
-    if (query.isEmpty) return;
+    // Determine which query to use based on current scope
+    final String query;
+    switch (_searchScope) {
+      case MailSearchScope.from:
+        query = _senderController.text.trim();
+        break;
+      case MailSearchScope.to:
+        query = _recipientController.text.trim();
+        break;
+      default:
+        query = _searchQuery.trim();
+    }
+    if (query.isEmpty) {
+      setState(() => _searchResults = null);
+      return;
+    }
     final credentials = await _getCredentials();
     if (credentials == null || !mounted) return;
     setState(() => _isSearching = true);
@@ -200,7 +258,23 @@ class _MailPageState extends State<MailPage> {
   }
 
   void _onScopeChanged(MailSearchScope scope) {
-    setState(() => _searchScope = scope);
+    // Tapping an already-selected chip toggles it off (back to allText)
+    if (_searchScope == scope) {
+      setState(() {
+        _searchScope = MailSearchScope.allText;
+        _searchResults = null;
+      });
+      // Re-run text search if main bar has content
+      if (_searchQuery.trim().isNotEmpty) _runSearch();
+      return;
+    }
+    setState(() {
+      _searchScope = scope;
+      _searchResults = null;
+    });
+    // For from/to, wait for user to type in secondary input
+    if (scope == MailSearchScope.from || scope == MailSearchScope.to) return;
+    // For subject, re-run if main bar has content
     if (_searchQuery.trim().isNotEmpty) {
       _searchDebounce?.cancel();
       _runSearch();
@@ -387,7 +461,7 @@ class _MailPageState extends State<MailPage> {
         child: Column(
           children: [
             _buildHeader(),
-            if (_searchQuery.isNotEmpty) _buildScopeChips(),
+            if (_showScopeArea) _buildScopeChips(),
             _buildToolbar(),
             const Divider(height: 1, color: Color(0xFFE5E7EB)),
             Expanded(
@@ -496,26 +570,104 @@ class _MailPageState extends State<MailPage> {
     return Container(
       color: const Color(0xFFD8E3F1),
       padding: const EdgeInsets.only(left: 16, right: 16, bottom: 10),
-      child: Row(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          _ScopeChip(
-            label: '按主题',
-            selected: _searchScope == MailSearchScope.subject,
-            onTap: () => _onScopeChanged(MailSearchScope.subject),
+          Row(
+            children: [
+              _ScopeChip(
+                label: '仅主题',
+                selected: _searchScope == MailSearchScope.subject,
+                onTap: () => _onScopeChanged(MailSearchScope.subject),
+              ),
+              const SizedBox(width: 8),
+              _ScopeChip(
+                label: '按发件人',
+                selected: _searchScope == MailSearchScope.from,
+                onTap: () => _onScopeChanged(MailSearchScope.from),
+              ),
+              const SizedBox(width: 8),
+              _ScopeChip(
+                label: '按收件人',
+                selected: _searchScope == MailSearchScope.to,
+                onTap: () => _onScopeChanged(MailSearchScope.to),
+              ),
+            ],
           ),
-          const SizedBox(width: 8),
-          _ScopeChip(
-            label: '按发件人',
-            selected: _searchScope == MailSearchScope.from,
-            onTap: () => _onScopeChanged(MailSearchScope.from),
-          ),
-          const SizedBox(width: 8),
-          _ScopeChip(
-            label: '按收件人',
-            selected: _searchScope == MailSearchScope.to,
-            onTap: () => _onScopeChanged(MailSearchScope.to),
-          ),
+          if (_searchScope == MailSearchScope.from)
+            _buildSecondaryEmailInput(
+              label: '发件人邮箱：',
+              controller: _senderController,
+              onChanged: _onSenderChanged,
+            ),
+          if (_searchScope == MailSearchScope.to)
+            _buildSecondaryEmailInput(
+              label: '收件人邮箱：',
+              controller: _recipientController,
+              onChanged: _onRecipientChanged,
+            ),
         ],
+      ),
+    );
+  }
+
+  Widget _buildSecondaryEmailInput({
+    required String label,
+    required TextEditingController controller,
+    required ValueChanged<String> onChanged,
+  }) {
+    return Padding(
+      padding: const EdgeInsets.only(top: 8),
+      child: Container(
+        height: 36,
+        decoration: BoxDecoration(
+          color: Colors.white.withValues(alpha: 0.85),
+          borderRadius: BorderRadius.circular(8),
+        ),
+        padding: const EdgeInsets.symmetric(horizontal: 10),
+        child: Row(
+          children: [
+            Text(
+              label,
+              style: const TextStyle(
+                fontSize: 12,
+                color: Color(0xFF6B7280),
+                fontWeight: FontWeight.w500,
+              ),
+            ),
+            Expanded(
+              child: TextField(
+                controller: controller,
+                onChanged: onChanged,
+                autofocus: true,
+                decoration: const InputDecoration(
+                  border: InputBorder.none,
+                  isDense: true,
+                  contentPadding: EdgeInsets.symmetric(vertical: 8),
+                  hintText: '输入邮箱地址...',
+                  hintStyle: TextStyle(
+                    fontSize: 12,
+                    color: Color(0xFFD1D5DB),
+                  ),
+                ),
+                style: const TextStyle(fontSize: 12, color: Color(0xFF111827)),
+                keyboardType: TextInputType.emailAddress,
+              ),
+            ),
+            if (controller.text.isNotEmpty)
+              GestureDetector(
+                onTap: () {
+                  controller.clear();
+                  onChanged('');
+                },
+                child: const Icon(
+                  Icons.close_rounded,
+                  size: 14,
+                  color: Color(0xFF9CA3AF),
+                ),
+              ),
+          ],
+        ),
       ),
     );
   }

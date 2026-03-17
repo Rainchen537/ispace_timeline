@@ -19,6 +19,7 @@ class MailServiceImpl extends MailService {
     required MailAccessCredentials credentials,
     required String query,
     MailFolder folder = MailFolder.inbox,
+    MailSearchScope searchScope = MailSearchScope.allText,
   }) async {
     throw UnimplementedError();
   }
@@ -44,6 +45,24 @@ class MailServiceImpl extends MailService {
   Future<void> sendEmail({
     required MailAccessCredentials credentials,
     required MailComposeData composeData,
+  }) async {
+    throw UnimplementedError();
+  }
+
+  @override
+  Future<int?> saveDraft({
+    required MailAccessCredentials credentials,
+    required MailComposeData composeData,
+    int? existingDraftUid,
+  }) async {
+    throw UnimplementedError();
+  }
+
+  @override
+  Future<void> deleteMessages({
+    required MailAccessCredentials credentials,
+    required MailFolder folder,
+    required List<int> uids,
   }) async {
     throw UnimplementedError();
   }

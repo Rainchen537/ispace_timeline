@@ -13,6 +13,36 @@ abstract class MailService {
     required int uid,
   });
 
+  Future<List<MailMessageSummary>> searchFolder({
+    required MailAccessCredentials credentials,
+    required String query,
+    MailFolder folder = MailFolder.inbox,
+    MailSearchScope searchScope = MailSearchScope.allText,
+  });
+
+  Future<void> sendEmail({
+    required MailAccessCredentials credentials,
+    required MailComposeData composeData,
+  });
+
+  Future<List<int>> downloadAttachment({
+    required MailAccessCredentials credentials,
+    required int uid,
+    required String partId,
+  });
+
+  Future<int?> saveDraft({
+    required MailAccessCredentials credentials,
+    required MailComposeData composeData,
+    int? existingDraftUid,
+  });
+
+  Future<void> deleteMessages({
+    required MailAccessCredentials credentials,
+    required MailFolder folder,
+    required List<int> uids,
+  });
+
   Future<void> close();
 }
 

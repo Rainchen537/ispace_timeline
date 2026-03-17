@@ -29,6 +29,8 @@ enum MailFolder {
   trash,
 }
 
+enum MailSearchScope { allText, subject, from, to }
+
 class MailAttachment {
   const MailAttachment({
     required this.name,
@@ -101,6 +103,7 @@ class MailMessageDetail {
     required this.htmlBody,
     required this.isSeen,
     this.attachments = const [],
+    this.messageId,
   });
 
   final int uid;
@@ -113,6 +116,7 @@ class MailMessageDetail {
   final String? htmlBody;
   final bool isSeen;
   final List<MailAttachment> attachments;
+  final String? messageId;
 }
 
 class MailFolderSnapshot {

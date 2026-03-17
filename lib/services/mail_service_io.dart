@@ -105,7 +105,7 @@ class _IoMailService implements MailService {
     required MailAccessCredentials credentials,
     required String query,
     MailFolder folder = MailFolder.inbox,
-    MailSearchScope searchScope = MailSearchScope.subject,
+    MailSearchScope searchScope = MailSearchScope.allText,
   }) async {
     try {
       final client = await _ensureConnected(credentials);
@@ -370,6 +370,8 @@ class _IoMailService implements MailService {
 
   SearchQueryType _mapSearchScope(MailSearchScope scope) {
     switch (scope) {
+      case MailSearchScope.allText:
+        return SearchQueryType.allTextHeaders;
       case MailSearchScope.subject:
         return SearchQueryType.subject;
       case MailSearchScope.from:
