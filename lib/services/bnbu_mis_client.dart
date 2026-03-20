@@ -4,6 +4,7 @@ import 'dart:math';
 
 import 'package:dart_sm/dart_sm.dart';
 
+import '../models/portal_account_profile.dart';
 import '../models/timetable_data.dart';
 
 class BnbuMisException implements Exception {
@@ -25,11 +26,14 @@ class BnbuMisClient {
 
   static const String _ssoBaseUrl = 'https://sso.bnbu.edu.cn';
   static const String _misBaseUrl = 'https://mis.bnbu.edu.cn';
+  static const String _portalBaseUrl = 'https://portal.bnbu.edu.cn';
   static const String _misServiceId = '3bvkl8pks1ki04nirus0g';
+  static const String _portalServiceId = 'na3j8azrv30vamqac8yg';
   static const String _misLaunchUrl =
       '$_ssoBaseUrl/auth/sso/ssoLogin?service=$_misServiceId';
-  static const String _htmlAcceptHeader =
-      'text/html,application/xhtml+xml,*/*';
+  static const String _portalLaunchUrl =
+      '$_ssoBaseUrl/auth/sso/ssoLogin?service=$_portalServiceId';
+  static const String _htmlAcceptHeader = 'text/html,application/xhtml+xml,*/*';
 
   final HttpClient _httpClient = HttpClient();
   final List<_StoredCookie> _cookieJar = <_StoredCookie>[];
@@ -43,12 +47,66 @@ class BnbuMisClient {
     required String username,
     required String password,
   }) async {
+    await _loginToSso(username: username, password: password);
+    await _openMisSession(username: username);
+    final timetableHtml = await _requestText(
+      'GET',
+      Uri.parse('$_misBaseUrl/mis/student/tts/timetable_min.do'),
+      headers: const <String, String>{
+        'X-Requested-With': 'XMLHttpRequest',
+        HttpHeaders.refererHeader: '$_misBaseUrl/mis/usr/index.do',
+        HttpHeaders.acceptHeader: '*/*',
+      },
+    );
+    final data = TimetableData.fromHtml(timetableHtml);
+    if (data.courses.isEmpty) {
+      throw BnbuMisException('MIS 课表解析失败，请稍后重试。');
+    }
+    return data;
+  }
+
+  Future<PortalAccountProfile> fetchPortalAccountProfile({
+    required String username,
+    required String password,
+  }) async {
+    await _loginToSso(username: username, password: password);
+    await _openPortalSession(username: username);
+
+    final response = await _requestJson(
+      'GET',
+      Uri.parse(
+        '$_portalBaseUrl/api/hrm/login/getAccountList'
+        '?__random__=${DateTime.now().millisecondsSinceEpoch}',
+      ),
+      headers: const <String, String>{
+        HttpHeaders.acceptHeader: '*/*',
+        'X-Requested-With': 'XMLHttpRequest',
+        HttpHeaders.refererHeader: '$_portalBaseUrl/wui/index.html',
+      },
+    );
+    if (_stringOf(response['status']) != '1') {
+      throw BnbuMisException('统一门户用户信息加载失败。');
+    }
+
+    final profile = PortalAccountProfile.fromPortalJson(
+      _mapOf(response['data']),
+    );
+    if (profile.isEmpty) {
+      throw BnbuMisException('未获取到统一门户账号信息。');
+    }
+    return profile;
+  }
+
+  Future<void> _loginToSso({
+    required String username,
+    required String password,
+  }) async {
     _cookieJar.clear();
     await _request(
       'GET',
       Uri.parse('$_ssoBaseUrl/'),
       headers: const <String, String>{
-        HttpHeaders.acceptHeader: 'text/html,application/xhtml+xml,*/*',
+        HttpHeaders.acceptHeader: _htmlAcceptHeader,
       },
     );
 
@@ -72,22 +130,6 @@ class BnbuMisClient {
       }
       throw BnbuMisException(message.isNotEmpty ? message : '统一认证登录失败。');
     }
-
-    await _openMisSession(username: username);
-    final timetableHtml = await _requestText(
-      'GET',
-      Uri.parse('$_misBaseUrl/mis/student/tts/timetable_min.do'),
-      headers: const <String, String>{
-        'X-Requested-With': 'XMLHttpRequest',
-        HttpHeaders.refererHeader: '$_misBaseUrl/mis/usr/index.do',
-        HttpHeaders.acceptHeader: '*/*',
-      },
-    );
-    final data = TimetableData.fromHtml(timetableHtml);
-    if (data.courses.isEmpty) {
-      throw BnbuMisException('MIS 课表解析失败，请稍后重试。');
-    }
-    return data;
   }
 
   Future<String> _loadSm2PublicKey() async {
@@ -144,6 +186,49 @@ class BnbuMisClient {
     }
   }
 
+  Future<void> _openPortalSession({required String username}) async {
+    final launchCandidates = <Uri>[
+      Uri.parse(
+        '$_ssoBaseUrl/auth/sso/login/$_portalServiceId'
+        '?service=$_portalServiceId&accountName=${Uri.encodeQueryComponent(username)}',
+      ),
+      Uri.parse(_portalLaunchUrl),
+      Uri.parse(_portalBaseUrl),
+      Uri.parse('$_portalBaseUrl/wui/index.html'),
+    ];
+
+    _Response? launch;
+    for (final candidate in launchCandidates) {
+      final response = await _request(
+        'GET',
+        candidate,
+        headers: const <String, String>{
+          HttpHeaders.acceptHeader: _htmlAcceptHeader,
+        },
+      );
+      final settled = await _followHtmlRedirectPages(response);
+      if (_looksLikePortalUri(settled.uri)) {
+        launch = settled;
+        break;
+      }
+    }
+
+    if (launch == null) {
+      throw BnbuMisException('未能打开统一门户入口。');
+    }
+
+    final indexResponse = await _request(
+      'GET',
+      Uri.parse('$_portalBaseUrl/wui/index.html'),
+      headers: const <String, String>{
+        HttpHeaders.acceptHeader: _htmlAcceptHeader,
+      },
+    );
+    if (!_looksLikePortalUri(indexResponse.uri)) {
+      throw BnbuMisException('统一门户会话建立失败，请重新登录后重试。');
+    }
+  }
+
   String _encryptPassword(String password, String rawPublicKey) {
     final encrypted = SM2.encrypt(password, '04$rawPublicKey');
     return encrypted.startsWith('04') ? encrypted : '04$encrypted';
@@ -157,6 +242,10 @@ class BnbuMisClient {
 
   bool _looksLikeMisUri(Uri uri) {
     return uri.host == Uri.parse(_misBaseUrl).host;
+  }
+
+  bool _looksLikePortalUri(Uri uri) {
+    return uri.host == Uri.parse(_portalBaseUrl).host;
   }
 
   Future<_Response> _followHtmlRedirectPages(
@@ -189,10 +278,7 @@ class BnbuMisClient {
     }
 
     final patterns = <RegExp>[
-      RegExp(
-        r'''redirect\(['"]([^'"]+)['"]\)''',
-        caseSensitive: false,
-      ),
+      RegExp(r'''redirect\(['"]([^'"]+)['"]\)''', caseSensitive: false),
       RegExp(
         r'''location\.replace\(['"]([^'"]+)['"]\)''',
         caseSensitive: false,
@@ -261,7 +347,11 @@ class BnbuMisClient {
     var currentUri = uri;
     var currentBody = body;
 
-    for (var redirectCount = 0; redirectCount <= redirectLimit; redirectCount++) {
+    for (
+      var redirectCount = 0;
+      redirectCount <= redirectLimit;
+      redirectCount++
+    ) {
       final request = await _httpClient.openUrl(currentMethod, currentUri);
       request.followRedirects = false;
       request.headers.set(
@@ -418,7 +508,10 @@ class _StoredCookie {
   final DateTime? expires;
 
   factory _StoredCookie.fromCookie(Cookie cookie, Uri uri) {
-    final domain = (cookie.domain ?? '').trim().replaceFirst(RegExp(r'^\.+'), '');
+    final domain = (cookie.domain ?? '').trim().replaceFirst(
+      RegExp(r'^\.+'),
+      '',
+    );
     final path = (cookie.path ?? '').trim();
     return _StoredCookie(
       name: cookie.name,
@@ -444,7 +537,8 @@ class _StoredCookie {
   bool matches(Uri uri) {
     final host = uri.host.toLowerCase();
     final domainMatch =
-        host == domain.toLowerCase() || host.endsWith('.${domain.toLowerCase()}');
+        host == domain.toLowerCase() ||
+        host.endsWith('.${domain.toLowerCase()}');
     final pathMatch = uri.path.isEmpty
         ? path == '/'
         : uri.path.startsWith(path.isEmpty ? '/' : path);

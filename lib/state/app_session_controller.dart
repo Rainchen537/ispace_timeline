@@ -4,6 +4,7 @@ import 'package:flutter/services.dart';
 import '../models/course_content.dart';
 import '../models/course_summary.dart';
 import '../models/mail_models.dart';
+import '../models/portal_account_profile.dart';
 import '../models/recent_course.dart';
 import '../models/timetable_data.dart';
 import '../models/timeline_detail_data.dart';
@@ -29,13 +30,16 @@ class AppSessionController extends ChangeNotifier {
   List<TimelineItem> _timelineItems = const [];
   List<CourseSummary> _courses = const [];
   List<RecentCourse> _recentCourses = const [];
+  PortalAccountProfile? _portalProfile;
   TimetableData? _timetable;
   bool _isLoggingIn = false;
   bool _isLoadingTimeline = false;
   bool _isLoadingCourses = false;
   bool _isLoadingRecentCourses = false;
   bool _isLoadingTimetable = false;
+  bool _isLoadingPortalProfile = false;
   String? _error;
+  String? _portalProfileError;
   String? _timetableError;
   String? _username;
   String? _password;
@@ -47,12 +51,14 @@ class AppSessionController extends ChangeNotifier {
   List<TimelineItem> get timelineItems => _timelineItems;
   List<CourseSummary> get courses => _courses;
   List<RecentCourse> get recentCourses => _recentCourses;
+  PortalAccountProfile? get portalProfile => _portalProfile;
   TimetableData? get timetable => _timetable;
   bool get isLoggingIn => _isLoggingIn;
   bool get isLoadingTimeline => _isLoadingTimeline;
   bool get isLoadingCourses => _isLoadingCourses;
   bool get isLoadingRecentCourses => _isLoadingRecentCourses;
   bool get isLoadingTimetable => _isLoadingTimetable;
+  bool get isLoadingPortalProfile => _isLoadingPortalProfile;
   bool get isRestoringSession => _isRestoringSession;
   bool get isBusy =>
       _isLoggingIn ||
@@ -63,6 +69,7 @@ class AppSessionController extends ChangeNotifier {
       _isRestoringSession;
   bool get isLoggedIn => _session != null;
   String? get error => _error;
+  String? get portalProfileError => _portalProfileError;
   String? get timetableError => _timetableError;
   String? get username => _username;
   String get baseUrl => _apiClient.baseUrl;
@@ -103,6 +110,7 @@ class AppSessionController extends ChangeNotifier {
         refreshTimeline(),
         refreshCourses(),
         refreshRecentCourses(),
+        refreshPortalProfile(),
       ]);
     } on MoodleApiException catch (error) {
       _error = error.message;
@@ -112,6 +120,8 @@ class AppSessionController extends ChangeNotifier {
       _timelineItems = const [];
       _courses = const [];
       _recentCourses = const [];
+      _portalProfile = null;
+      _portalProfileError = null;
       _timetable = null;
       _timetableError = null;
       if (fromStorage) {
@@ -126,6 +136,8 @@ class AppSessionController extends ChangeNotifier {
       _timelineItems = const [];
       _courses = const [];
       _recentCourses = const [];
+      _portalProfile = null;
+      _portalProfileError = null;
       _timetable = null;
       _timetableError = null;
       if (fromStorage) {
@@ -285,6 +297,38 @@ class AppSessionController extends ChangeNotifier {
     }
   }
 
+  Future<void> refreshPortalProfile() async {
+    final credentials = await _currentCredentials();
+    if (credentials == null) {
+      _portalProfile = null;
+      _portalProfileError = '请先登录后同步统一门户资料。';
+      notifyListeners();
+      return;
+    }
+
+    _isLoadingPortalProfile = true;
+    _portalProfileError = null;
+    notifyListeners();
+
+    try {
+      final profile = await _misClient.fetchPortalAccountProfile(
+        username: credentials.$1,
+        password: credentials.$2,
+      );
+      _portalProfile = profile;
+      notifyListeners();
+    } on BnbuMisException catch (error) {
+      _portalProfileError = error.message;
+      notifyListeners();
+    } catch (_) {
+      _portalProfileError = '统一门户用户信息加载失败，请稍后重试。';
+      notifyListeners();
+    } finally {
+      _isLoadingPortalProfile = false;
+      notifyListeners();
+    }
+  }
+
   Future<List<CourseContentSection>> loadCourseContents(int courseId) async {
     if (_session == null) {
       throw MoodleApiException('请先登录后查看课程内容。');
@@ -407,8 +451,10 @@ class AppSessionController extends ChangeNotifier {
     _timelineItems = const [];
     _courses = const [];
     _recentCourses = const [];
+    _portalProfile = null;
     _timetable = null;
     _error = null;
+    _portalProfileError = null;
     _timetableError = null;
     _clearSavedCredentials();
     notifyListeners();

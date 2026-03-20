@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 import 'package:package_info_plus/package_info_plus.dart';
 
+import '../models/portal_account_profile.dart';
 import '../services/moodle_api_client.dart';
 import '../state/app_session_controller.dart';
 
@@ -172,6 +173,7 @@ class _UserPageState extends State<UserPage> {
         final controller = widget.controller;
         final session = controller.session;
         final username = controller.username?.trim();
+        final portalProfile = controller.portalProfile;
         final hasSession = session != null;
 
         return Scaffold(
@@ -181,7 +183,12 @@ class _UserPageState extends State<UserPage> {
               bottom: MediaQuery.of(context).padding.bottom + 24,
             ),
             children: [
-              _UserHero(session: session, username: username),
+              _UserHero(
+                session: session,
+                username: username,
+                portalProfile: portalProfile,
+                isLoadingPortalProfile: controller.isLoadingPortalProfile,
+              ),
               if (controller.error != null) ...[
                 Padding(
                   padding: const EdgeInsets.fromLTRB(16, 18, 16, 0),
@@ -245,10 +252,17 @@ class _UserPageState extends State<UserPage> {
 }
 
 class _UserHero extends StatelessWidget {
-  const _UserHero({required this.session, required this.username});
+  const _UserHero({
+    required this.session,
+    required this.username,
+    required this.portalProfile,
+    required this.isLoadingPortalProfile,
+  });
 
   final AuthSession? session;
   final String? username;
+  final PortalAccountProfile? portalProfile;
+  final bool isLoadingPortalProfile;
 
   @override
   Widget build(BuildContext context) {
@@ -333,10 +347,15 @@ class _UserHero extends StatelessWidget {
             ),
           ),
           Align(
-            alignment: const Alignment(0, 0.22),
+            alignment: const Alignment(0, 0.34),
             child: Padding(
               padding: const EdgeInsets.symmetric(horizontal: 24),
-              child: _AcrylicProfileCard(session: session, username: username),
+              child: _AcrylicProfileCard(
+                session: session,
+                username: username,
+                portalProfile: portalProfile,
+                isLoadingPortalProfile: isLoadingPortalProfile,
+              ),
             ),
           ),
         ],
@@ -346,69 +365,122 @@ class _UserHero extends StatelessWidget {
 }
 
 class _AcrylicProfileCard extends StatelessWidget {
-  const _AcrylicProfileCard({required this.session, required this.username});
+  const _AcrylicProfileCard({
+    required this.session,
+    required this.username,
+    required this.portalProfile,
+    required this.isLoadingPortalProfile,
+  });
 
   final AuthSession? session;
   final String? username;
+  final PortalAccountProfile? portalProfile;
+  final bool isLoadingPortalProfile;
 
   @override
   Widget build(BuildContext context) {
-    final fullName = session?.fullName.trim();
+    final fullName = portalProfile?.fullName.trim();
     final displayName = (fullName != null && fullName.isNotEmpty)
         ? fullName
+        : (session?.fullName.trim().isNotEmpty ?? false)
+        ? session!.fullName.trim()
         : '未登录 iSpace';
-    final loginName = (username != null && username!.isNotEmpty)
-        ? username!
-        : '未获取到登录用户名';
-    final subtitle = session == null ? '登录状态不可用，请重新登录。' : loginName;
+    final majorName = portalProfile?.majorName.trim() ?? '';
+    final emailAddress = _resolveStudentEmail(username);
+    final majorLine = majorName.isNotEmpty
+        ? majorName
+        : session == null
+        ? '登录后可同步身份和组织专业信息'
+        : isLoadingPortalProfile
+        ? '请稍候片刻'
+        : '专业信息同步中';
+    final emailLine = emailAddress.isNotEmpty
+        ? emailAddress
+        : session == null
+        ? '登录后可显示学生邮箱'
+        : '邮箱信息同步中';
 
     return ClipRRect(
       borderRadius: BorderRadius.circular(22),
       child: BackdropFilter(
-        filter: ImageFilter.blur(sigmaX: 22, sigmaY: 22),
+        filter: ImageFilter.blur(sigmaX: 8, sigmaY: 8),
         child: Container(
-          constraints: const BoxConstraints(maxWidth: 400),
-          padding: const EdgeInsets.fromLTRB(16, 14, 16, 14),
+          constraints: const BoxConstraints(maxWidth: 400, minHeight: 132),
+          padding: const EdgeInsets.fromLTRB(18, 22, 18, 22),
           decoration: BoxDecoration(
-            color: Colors.white.withValues(alpha: 0.30),
+            gradient: LinearGradient(
+              begin: Alignment.topLeft,
+              end: Alignment.bottomRight,
+              colors: [
+                Colors.white.withValues(alpha: 0.16),
+                const Color(0xFFE7F1FB).withValues(alpha: 0.08),
+              ],
+            ),
             borderRadius: BorderRadius.circular(22),
-            border: Border.all(color: Colors.white.withValues(alpha: 0.26)),
+            border: Border.all(color: Colors.white.withValues(alpha: 0.24)),
             boxShadow: [
               BoxShadow(
-                color: const Color(0xFF113355).withValues(alpha: 0.14),
-                blurRadius: 24,
-                offset: const Offset(0, 12),
+                color: const Color(0xFF113355).withValues(alpha: 0.10),
+                blurRadius: 16,
+                offset: const Offset(0, 8),
               ),
             ],
           ),
           child: Row(
             crossAxisAlignment: CrossAxisAlignment.center,
             children: [
-              _AvatarBubble(initial: _resolveInitial(displayName)),
-              const SizedBox(width: 12),
               Expanded(
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   mainAxisSize: MainAxisSize.min,
                   children: [
-                    Text(
-                      displayName,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                        fontWeight: FontWeight.w800,
-                        color: const Color(0xFF17324D),
-                      ),
+                    Row(
+                      children: [
+                        Expanded(
+                          child: Text(
+                            displayName,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: Theme.of(context).textTheme.titleLarge
+                                ?.copyWith(
+                                  fontWeight: FontWeight.w800,
+                                  fontSize: 20,
+                                  color: const Color(0xFFF8FBFF),
+                                ),
+                          ),
+                        ),
+                        if (isLoadingPortalProfile)
+                          const SizedBox(
+                            width: 16,
+                            height: 16,
+                            child: CircularProgressIndicator(strokeWidth: 1.8),
+                          ),
+                      ],
                     ),
-                    const SizedBox(height: 2),
-                    Text(
-                      subtitle,
+                    const SizedBox(height: 10),
+                    _ProfileMetaRow(
+                      icon: Icons.school_rounded,
+                      text: majorLine,
+                      maxLines: 2,
+                      textStyle: Theme.of(context).textTheme.bodyMedium
+                          ?.copyWith(
+                            fontSize: 15,
+                            color: const Color(0xFFF6FAFF),
+                            fontWeight: FontWeight.w700,
+                            height: 1.4,
+                          ),
+                    ),
+                    const SizedBox(height: 9),
+                    _ProfileMetaRow(
+                      icon: Icons.mail_outline_rounded,
+                      text: emailLine,
                       maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                        color: const Color(0xFF42586F),
-                        fontWeight: FontWeight.w600,
-                      ),
+                      textStyle: Theme.of(context).textTheme.bodyMedium
+                          ?.copyWith(
+                            fontSize: 14.5,
+                            color: const Color(0xFFE7F1FF),
+                            fontWeight: FontWeight.w700,
+                          ),
                     ),
                   ],
                 ),
@@ -420,49 +492,47 @@ class _AcrylicProfileCard extends StatelessWidget {
     );
   }
 
-  String _resolveInitial(String value) {
-    final trimmed = value.trim();
-    if (trimmed.isEmpty) {
-      return '?';
+  String _resolveStudentEmail(String? username) {
+    final normalized = (username ?? '').trim().split('@').first.toLowerCase();
+    if (normalized.isEmpty) {
+      return '';
     }
-    return String.fromCharCode(trimmed.runes.first).toUpperCase();
+    return '$normalized@mail.bnbu.edu.cn';
   }
 }
 
-class _AvatarBubble extends StatelessWidget {
-  const _AvatarBubble({required this.initial});
+class _ProfileMetaRow extends StatelessWidget {
+  const _ProfileMetaRow({
+    required this.icon,
+    required this.text,
+    required this.maxLines,
+    this.textStyle,
+  });
 
-  final String initial;
+  final IconData icon;
+  final String text;
+  final int maxLines;
+  final TextStyle? textStyle;
 
   @override
   Widget build(BuildContext context) {
-    return Container(
-      width: 46,
-      height: 46,
-      decoration: BoxDecoration(
-        shape: BoxShape.circle,
-        gradient: const LinearGradient(
-          begin: Alignment.topLeft,
-          end: Alignment.bottomRight,
-          colors: [Color(0xFF4D88C7), Color(0xFF235789)],
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Padding(
+          padding: const EdgeInsets.only(top: 1),
+          child: Icon(icon, size: 16, color: const Color(0xFFF5FAFF)),
         ),
-        boxShadow: [
-          BoxShadow(
-            color: const Color(0xFF235789).withValues(alpha: 0.24),
-            blurRadius: 12,
-            offset: const Offset(0, 6),
+        const SizedBox(width: 8),
+        Expanded(
+          child: Text(
+            text,
+            maxLines: maxLines,
+            overflow: TextOverflow.ellipsis,
+            style: textStyle,
           ),
-        ],
-      ),
-      alignment: Alignment.center,
-      child: Text(
-        initial,
-        style: const TextStyle(
-          color: Colors.white,
-          fontSize: 18,
-          fontWeight: FontWeight.w800,
         ),
-      ),
+      ],
     );
   }
 }
