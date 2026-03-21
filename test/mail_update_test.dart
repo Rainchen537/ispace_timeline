@@ -1,4 +1,7 @@
+import 'dart:io';
+
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -16,8 +19,12 @@ class _MockMailService implements MailService {
 
   final List<int> deletedUids = [];
   final List<int> restoredUids = [];
+  final List<String> downloadedPartIds = [];
   int? savedDraftUid;
   MailComposeData? sentData;
+
+  // Override readMessage to return a custom MailMessageDetail
+  MailMessageDetail? Function(int uid)? readMessageOverride;
 
   // Capture last searchFolder call for assertions
   String? lastSearchQuery;
@@ -90,6 +97,8 @@ class _MockMailService implements MailService {
     required MailAccessCredentials credentials,
     required int uid,
   }) async {
+    final override = readMessageOverride?.call(uid);
+    if (override != null) return override;
     final all = [..._inbox, ..._drafts, ..._trash];
     final summary = all.firstWhere((m) => m.uid == uid);
     return MailMessageDetail(
@@ -130,8 +139,10 @@ class _MockMailService implements MailService {
     required MailAccessCredentials credentials,
     required int uid,
     required String partId,
-  }) async =>
-      [];
+  }) async {
+    downloadedPartIds.add(partId);
+    return [1, 2, 3];
+  }
 
   @override
   Future<int?> saveDraft({
@@ -811,6 +822,121 @@ void main() {
           reason: 'Load more should request page 2, not page 1 again');
       expect(svc.fetchFolderCallCount, greaterThan(initialCallCount),
           reason: 'fetchFolder should have been called for page 2');
+    });
+  });
+
+  // ── Test 8: Mail attachment display ───────────────────────────────────────
+
+  group('Mail attachment display', () {
+    testWidgets('UI shows attachment section with filename and 附件 label',
+        (tester) async {
+      final msg = _makeSummary(uid: 1, subject: 'Has Attachment');
+      final svc = _MockMailService(inbox: [msg]);
+      svc.readMessageOverride = (uid) => const MailMessageDetail(
+            uid: 1,
+            subject: 'Has Attachment',
+            sender: 'sender@example.com',
+            recipients: 'testuser@mail.bnbu.edu.cn',
+            cc: null,
+            date: null,
+            body: 'Body text',
+            htmlBody: null,
+            isSeen: true,
+            attachments: [
+              MailAttachment(
+                name: 'report.pdf',
+                size: 0,
+                mimeType: 'application/pdf',
+                partId: '2',
+              ),
+            ],
+          );
+
+      await tester.pumpWidget(
+        _wrapInApp(
+          MailPage.withService(
+            controller: null,
+            mailService: svc,
+            testCredentials: _creds(),
+          ),
+        ),
+      );
+      await tester.pump(); // initial load
+
+      // Tap the message to open detail
+      await tester.tap(find.text('Has Attachment'));
+      await tester.pumpAndSettle();
+
+      // Attachment section should be visible
+      expect(find.text('附件'), findsOneWidget,
+          reason: 'Detail page should show 附件 label when attachments exist');
+      expect(find.text('report.pdf'), findsOneWidget,
+          reason: 'Detail page should show attachment filename');
+    });
+
+    testWidgets('tapping attachment chip calls downloadAttachment',
+        (tester) async {
+      final msg = _makeSummary(uid: 2, subject: 'Attachment Email');
+      final svc = _MockMailService(inbox: [msg]);
+      svc.readMessageOverride = (uid) => const MailMessageDetail(
+            uid: 2,
+            subject: 'Attachment Email',
+            sender: 'sender@example.com',
+            recipients: 'testuser@mail.bnbu.edu.cn',
+            cc: null,
+            date: null,
+            body: 'Body text',
+            htmlBody: null,
+            isSeen: true,
+            attachments: [
+              MailAttachment(
+                name: 'document.pdf',
+                size: 0,
+                mimeType: 'application/pdf',
+                partId: '2',
+              ),
+            ],
+          );
+
+      // Mock the native_actions channel
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(
+        const MethodChannel('ispace/native_actions'),
+        (call) async {
+          if (call.method == 'getMailAttachmentCacheDir') {
+            return Directory.systemTemp.path;
+          }
+          return null;
+        },
+      );
+
+      await tester.pumpWidget(
+        _wrapInApp(
+          MailPage.withService(
+            controller: null,
+            mailService: svc,
+            testCredentials: _creds(),
+          ),
+        ),
+      );
+      await tester.pump(); // initial load
+
+      // Tap the message to open detail
+      await tester.tap(find.text('Attachment Email'));
+      await tester.pumpAndSettle();
+
+      // Tap the attachment chip (find by filename text)
+      await tester.tap(find.text('document.pdf'));
+      await tester.pump(); // start download
+      await tester.pump(); // complete download
+
+      expect(svc.downloadedPartIds, contains('2'),
+          reason: 'downloadAttachment should have been called with partId=2');
+
+      // Cleanup mock
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(
+              const MethodChannel('ispace/native_actions'), null);
     });
   });
 }
