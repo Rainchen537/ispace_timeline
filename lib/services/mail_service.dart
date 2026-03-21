@@ -43,6 +43,12 @@ abstract class MailService {
     required List<int> uids,
   });
 
+  Future<void> restoreMessages({
+    required MailAccessCredentials credentials,
+    required List<int> uids,
+    required String userEmailAddress,
+  });
+
   Future<void> close();
 }
 

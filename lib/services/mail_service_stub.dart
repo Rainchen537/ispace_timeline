@@ -68,5 +68,12 @@ class MailServiceImpl extends MailService {
   }
 
   @override
+  Future<void> restoreMessages({
+    required MailAccessCredentials credentials,
+    required List<int> uids,
+    required String userEmailAddress,
+  }) async {}
+
+  @override
   Future<void> close() async {}
 }

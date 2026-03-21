@@ -11,7 +11,11 @@ import 'package:ispace_timeline/services/mail_service.dart';
 class _MockMailService implements MailService {
   final List<MailMessageSummary> _inbox;
   final List<MailMessageSummary> _drafts;
+  final List<MailMessageSummary> _trash;
+  final int? _fakeTotal;
+
   final List<int> deletedUids = [];
+  final List<int> restoredUids = [];
   int? savedDraftUid;
   MailComposeData? sentData;
 
@@ -19,27 +23,54 @@ class _MockMailService implements MailService {
   String? lastSearchQuery;
   MailSearchScope? lastSearchScope;
 
+  // Capture pagination calls
+  int fetchFolderCallCount = 0;
+  int lastFetchedPage = 0;
+
   _MockMailService({
     List<MailMessageSummary>? inbox,
     List<MailMessageSummary>? drafts,
+    List<MailMessageSummary>? trash,
+    int? fakeTotal,
   })  : _inbox = inbox ?? [],
-        _drafts = drafts ?? [];
+        _drafts = drafts ?? [],
+        _trash = trash ?? [],
+        _fakeTotal = fakeTotal;
 
-  static MailFolderSnapshot _snapshot(
+  List<MailMessageSummary> _listForFolder(MailFolder folder) {
+    switch (folder) {
+      case MailFolder.drafts:
+        return _drafts;
+      case MailFolder.trash:
+        return _trash;
+      default:
+        return _inbox;
+    }
+  }
+
+  MailFolderSnapshot _makeSnapshot(
     MailFolder folder,
-    List<MailMessageSummary> msgs,
-  ) =>
-      MailFolderSnapshot(
-        emailAddress: 'test@mail.bnbu.edu.cn',
-        incomingServer: 'imap.example.com',
-        outgoingServer: 'smtp.example.com',
-        messages: msgs,
-        fetchedAt: DateTime.now(),
-        folder: folder,
-        totalMessages: msgs.length,
-        currentPage: 1,
-        pageSize: 25,
-      );
+    List<MailMessageSummary> allMsgs,
+    int page,
+    int pageSize,
+  ) {
+    final total = _fakeTotal ?? allMsgs.length;
+    final start = (page - 1) * pageSize;
+    final end = (start + pageSize).clamp(0, allMsgs.length);
+    final pageMsgs =
+        start < allMsgs.length ? allMsgs.sublist(start, end) : <MailMessageSummary>[];
+    return MailFolderSnapshot(
+      emailAddress: 'test@mail.bnbu.edu.cn',
+      incomingServer: 'imap.example.com',
+      outgoingServer: 'smtp.example.com',
+      messages: pageMsgs,
+      fetchedAt: DateTime.now(),
+      folder: folder,
+      totalMessages: total,
+      currentPage: page,
+      pageSize: pageSize,
+    );
+  }
 
   @override
   Future<MailFolderSnapshot> fetchFolder({
@@ -48,8 +79,10 @@ class _MockMailService implements MailService {
     int page = 1,
     int pageSize = 25,
   }) async {
-    final msgs = folder == MailFolder.drafts ? _drafts : _inbox;
-    return _snapshot(folder, msgs);
+    fetchFolderCallCount++;
+    lastFetchedPage = page;
+    final msgs = _listForFolder(folder);
+    return _makeSnapshot(folder, msgs, page, pageSize);
   }
 
   @override
@@ -57,7 +90,7 @@ class _MockMailService implements MailService {
     required MailAccessCredentials credentials,
     required int uid,
   }) async {
-    final all = [..._inbox, ..._drafts];
+    final all = [..._inbox, ..._drafts, ..._trash];
     final summary = all.firstWhere((m) => m.uid == uid);
     return MailMessageDetail(
       uid: summary.uid,
@@ -117,6 +150,15 @@ class _MockMailService implements MailService {
     required List<int> uids,
   }) async {
     deletedUids.addAll(uids);
+  }
+
+  @override
+  Future<void> restoreMessages({
+    required MailAccessCredentials credentials,
+    required List<int> uids,
+    required String userEmailAddress,
+  }) async {
+    restoredUids.addAll(uids);
   }
 
   @override
@@ -556,6 +598,219 @@ void main() {
 
       expect(svc.lastSearchScope, equals(MailSearchScope.subject),
           reason: '仅主题 chip must switch scope to subject');
+    });
+  });
+
+  // ── Test 5: Trash restore ──────────────────────────────────────────────────
+
+  group('Trash restore', () {
+    testWidgets('trash folder multi-select bar shows 恢复 not 删除',
+        (tester) async {
+      final trashMsg = _makeSummary(uid: 10, subject: 'Deleted email');
+      final svc = _MockMailService(trash: [trashMsg]);
+
+      await tester.pumpWidget(
+        _wrapInApp(
+          MailPage.withService(
+            controller: null,
+            mailService: svc,
+            testCredentials: _creds(),
+          ),
+        ),
+      );
+      await tester.pump(); // initial inbox load
+
+      // Switch to trash folder
+      await tester.tap(find.byType(PopupMenuButton<MailFolder>));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('已删除'));
+      await tester.pumpAndSettle();
+      await tester.pump(); // fetchFolder(trash) completes
+
+      // Long-press to enter multi-select (auto-selects uid=10)
+      await tester.longPress(find.text('Deleted email'));
+      await tester.pump();
+
+      // Bottom bar should show 恢复, not 删除
+      expect(find.text('恢复'), findsOneWidget,
+          reason: 'Trash multi-select should show 恢复 button');
+      expect(find.text('删除'), findsNothing,
+          reason: 'Trash multi-select should NOT show 删除 button');
+    });
+
+    testWidgets('tapping 恢复 calls restoreMessages with selected UIDs',
+        (tester) async {
+      final trashMsg = _makeSummary(uid: 10, subject: 'Deleted email');
+      final svc = _MockMailService(trash: [trashMsg]);
+
+      await tester.pumpWidget(
+        _wrapInApp(
+          MailPage.withService(
+            controller: null,
+            mailService: svc,
+            testCredentials: _creds(),
+          ),
+        ),
+      );
+      await tester.pump();
+
+      // Switch to trash
+      await tester.tap(find.byType(PopupMenuButton<MailFolder>));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('已删除'));
+      await tester.pumpAndSettle();
+      await tester.pump();
+
+      // Long-press to enter multi-select (selects uid=10)
+      await tester.longPress(find.text('Deleted email'));
+      await tester.pump();
+
+      // Tap 恢复 in the bottom bar
+      await tester.tap(find.text('恢复'));
+      await tester.pumpAndSettle();
+
+      // Confirmation dialog should appear
+      expect(find.byType(AlertDialog), findsOneWidget);
+
+      // Tap the dialog's 恢复 confirm button
+      await tester.tap(
+        find.descendant(
+          of: find.byType(AlertDialog),
+          matching: find.text('恢复'),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(svc.restoredUids, contains(10),
+          reason: 'restoreMessages should have been called with uid=10');
+    });
+  });
+
+  // ── Test 6: Reply HTML format ──────────────────────────────────────────────
+
+  group('Reply HTML format', () {
+    testWidgets('ComposeMailPage in reply mode shows quoted original section',
+        (tester) async {
+      final svc = _MockMailService();
+      final creds = _creds();
+
+      const replyTo = MailMessageDetail(
+        uid: 5,
+        subject: 'Original Subject',
+        sender: 'original@example.com',
+        recipients: 'testuser@mail.bnbu.edu.cn',
+        cc: null,
+        date: null,
+        body: 'Original message body text',
+        htmlBody: null,
+        isSeen: true,
+      );
+
+      await tester.pumpWidget(
+        _wrapInApp(
+          ComposeMailPage(
+            mailService: svc,
+            credentials: creds,
+            replyTo: replyTo,
+          ),
+        ),
+      );
+      await tester.pump();
+
+      // The quoted section must show the original body text — this cannot come
+      // from the To/Subject pre-fill so it only appears if the quoted block exists.
+      expect(
+        find.textContaining('Original message body text'),
+        findsOneWidget,
+        reason: 'Reply compose should show original body text in quoted section',
+      );
+    });
+
+    testWidgets('sendEmail called with htmlBody when replying', (tester) async {
+      final svc = _MockMailService();
+      final creds = _creds();
+
+      const replyTo = MailMessageDetail(
+        uid: 5,
+        subject: 'Original Subject',
+        sender: 'original@example.com',
+        recipients: 'testuser@mail.bnbu.edu.cn',
+        cc: null,
+        date: null,
+        body: 'Original body',
+        htmlBody: null,
+        isSeen: true,
+      );
+
+      await tester.pumpWidget(
+        _wrapInApp(
+          ComposeMailPage(
+            mailService: svc,
+            credentials: creds,
+            replyTo: replyTo,
+          ),
+        ),
+      );
+      await tester.pump();
+
+      // Type reply text in the body field
+      await tester.enterText(
+        find.byWidgetPredicate(
+          (w) => w is TextField && w.decoration?.hintText == '写点什么...',
+        ),
+        'My reply text',
+      );
+
+      // Tap send
+      await tester.tap(find.text('发送'));
+      await tester.pump(); // start async op
+      await tester.pump(); // complete async op (mock is instant)
+
+      expect(svc.sentData?.htmlBody, isNotNull,
+          reason: 'Reply email should include htmlBody');
+      expect(svc.sentData?.htmlBody, contains('original@example.com'),
+          reason: 'HTML body should include original sender info');
+    });
+  });
+
+  // ── Test 7: Pagination ─────────────────────────────────────────────────────
+
+  group('Pagination', () {
+    testWidgets('load more calls fetchFolder with incremented page',
+        (tester) async {
+      // 3 inbox messages but fakeTotal=50 → hasMore is true after page 1
+      final msgs = List.generate(
+        3,
+        (i) => _makeSummary(uid: i + 1, subject: 'Message ${i + 1}'),
+      );
+      final svc = _MockMailService(inbox: msgs, fakeTotal: 50);
+
+      await tester.pumpWidget(
+        _wrapInApp(
+          MailPage.withService(
+            controller: null,
+            mailService: svc,
+            testCredentials: _creds(),
+          ),
+        ),
+      );
+      await tester.pump(); // initial load page 1
+
+      final initialCallCount = svc.fetchFolderCallCount;
+
+      // "加载更多" button should be visible (hasMore = 1*25 < 50 = true)
+      expect(find.text('加载更多'), findsOneWidget,
+          reason: '"加载更多" should appear when hasMore is true');
+
+      // Tap load more
+      await tester.tap(find.text('加载更多'));
+      await tester.pump(); // start async
+      await tester.pump(); // complete
+
+      expect(svc.lastFetchedPage, equals(2),
+          reason: 'Load more should request page 2, not page 1 again');
+      expect(svc.fetchFolderCallCount, greaterThan(initialCallCount),
+          reason: 'fetchFolder should have been called for page 2');
     });
   });
 }

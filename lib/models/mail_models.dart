@@ -175,6 +175,7 @@ class MailComposeData {
     this.cc,
     required this.subject,
     required this.body,
+    this.htmlBody,
     this.inReplyTo,
     this.references,
   });
@@ -183,6 +184,7 @@ class MailComposeData {
   final String? cc;
   final String subject;
   final String body;
+  final String? htmlBody;
   final String? inReplyTo;
   final String? references;
 }

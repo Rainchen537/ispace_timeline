@@ -107,24 +107,27 @@ class _IoMailService implements MailService {
     MailFolder folder = MailFolder.inbox,
     MailSearchScope searchScope = MailSearchScope.allText,
   }) async {
+    final lowerQuery = query.trim().toLowerCase();
+    if (lowerQuery.isEmpty) return [];
     try {
       final client = await _ensureConnected(credentials);
       final folderPath = _mapFolderToPath(folder);
-      await client.selectMailboxByPath(folderPath);
+      final mailbox = await client.selectMailboxByPath(folderPath);
 
-      // Use MailSearch for high-level searching
-      final search = MailSearch(
-        query,
-        _mapSearchScope(searchScope),
-        pageSize: 50,
+      final total = mailbox.messagesExists;
+      if (total == 0) return [];
+
+      // Fetch all messages with envelope (from/subject/date/flags only)
+      // for fast client-side filtering, since QQ exmail does not support
+      // IMAP SEARCH criteria properly.
+      final messages = await client.fetchMessages(
+        count: total,
+        fetchPreference: FetchPreference.envelope,
       );
 
-      final result = await client.searchMessages(search);
-      
-      final List<MimeMessage> messages = result.messages;
-      
       final summaries = messages
           .where((m) => m.uid != null)
+          .where((m) => _messageMatchesSearch(m, lowerQuery, searchScope))
           .map(_toSummary)
           .toList(growable: false)
         ..sort(_sortSummariesDesc);
@@ -133,6 +136,55 @@ class _IoMailService implements MailService {
     } catch (error) {
       throw _mapError(error);
     }
+  }
+
+  bool _messageMatchesSearch(
+    MimeMessage message,
+    String lowerQuery,
+    MailSearchScope scope,
+  ) {
+    switch (scope) {
+      case MailSearchScope.allText:
+        return _subjectContains(message, lowerQuery) ||
+            _fromContains(message, lowerQuery) ||
+            _toContains(message, lowerQuery) ||
+            _bodyContains(message, lowerQuery);
+      case MailSearchScope.subject:
+        return _subjectContains(message, lowerQuery);
+      case MailSearchScope.from:
+        return _fromContains(message, lowerQuery);
+      case MailSearchScope.to:
+        return _toContains(message, lowerQuery);
+    }
+  }
+
+  bool _subjectContains(MimeMessage message, String query) =>
+      (message.decodeSubject()?.toLowerCase() ?? '').contains(query);
+
+  bool _fromContains(MimeMessage message, String query) =>
+      _addressListContains(message.from, query);
+
+  bool _toContains(MimeMessage message, String query) =>
+      _addressListContains(message.to, query) ||
+      _addressListContains(message.cc, query);
+
+  bool _addressListContains(List<MailAddress>? addresses, String query) {
+    if (addresses == null || addresses.isEmpty) return false;
+    return addresses.any(
+      (addr) =>
+          (addr.email.toLowerCase()).contains(query) ||
+          (addr.personalName?.toLowerCase() ?? '').contains(query),
+    );
+  }
+
+  bool _bodyContains(MimeMessage message, String query) {
+    // Body is only available for fully-fetched cached messages
+    final uid = message.uid;
+    if (uid == null) return false;
+    final cached = _messageCache[uid];
+    if (cached == null) return false;
+    final plain = cached.decodeTextPlainPart()?.toLowerCase() ?? '';
+    return plain.contains(query);
   }
 
   @override
@@ -242,13 +294,52 @@ class _IoMailService implements MailService {
     if (uids.isEmpty) return;
     try {
       final client = await _ensureConnected(credentials);
-      // Ensure mailbox list is cached so deleteMessages can locate the trash folder
       if (client.mailboxes == null) {
         await client.listMailboxes();
       }
       await client.selectMailboxByPath(_mapFolderToPath(folder));
       final sequence = MessageSequence.fromIds(uids, isUid: true);
-      await client.deleteMessages(sequence, expunge: false);
+
+      // Try the standard path: enough_mail will attempt UID MOVE (or UID COPY+\Deleted).
+      bool moved = false;
+      try {
+        await client.deleteMessages(sequence, expunge: false);
+        moved = true;
+      } on MailException {
+        // QQ exmail returns "100001 Mails not exist!" for UID MOVE even when
+        // the message exists.  Fall through to the manual UID-based fallback.
+      }
+
+      if (!moved) {
+        // Fallback: UID COPY to trash + UID STORE \Deleted + EXPUNGE.
+        // We access the low-level ImapClient because MailClient.deleteMessages
+        // with expunge:true incorrectly calls STORE (sequence-number-based)
+        // instead of UID STORE for UID sequences.
+        final imapClient = client.lowLevelIncomingMailClient as ImapClient;
+
+        if (folder != MailFolder.trash) {
+          // Best-effort copy to trash so the message appears in Deleted Messages.
+          try {
+            await imapClient.uidCopy(
+              sequence,
+              targetMailboxPath: _mapFolderToPath(MailFolder.trash),
+            );
+          } catch (_) {
+            // If copy to trash fails, skip it and proceed to permanent delete.
+          }
+        }
+
+        // Mark as \Deleted using UID STORE (correct UID-based command).
+        await imapClient.uidStore(
+          sequence,
+          [MessageFlags.deleted],
+          action: StoreAction.add,
+          silent: true,
+        );
+        // EXPUNGE removes all \Deleted messages from the selected mailbox.
+        await imapClient.expunge();
+      }
+
       for (final uid in uids) {
         _messageCache.remove(uid);
       }
@@ -266,14 +357,24 @@ class _IoMailService implements MailService {
     try {
       final client = await _ensureConnected(credentials);
 
-      // Delete old draft if exists
+      // Delete old draft if exists.
       if (existingDraftUid != null) {
         try {
           await client.selectMailboxByPath(_mapFolderToPath(MailFolder.drafts));
-          await client.deleteMessages(
-            MessageSequence.fromIds([existingDraftUid], isUid: true),
-            expunge: true,
+          final draftSeq = MessageSequence.fromIds(
+            [existingDraftUid],
+            isUid: true,
           );
+          // Use UID STORE \Deleted + EXPUNGE directly to avoid enough_mail's
+          // deleteMessages(expunge:true) bug which uses STORE (not UID STORE).
+          final imapClient = client.lowLevelIncomingMailClient as ImapClient;
+          await imapClient.uidStore(
+            draftSeq,
+            [MessageFlags.deleted],
+            action: StoreAction.add,
+            silent: true,
+          );
+          await imapClient.expunge();
           _messageCache.remove(existingDraftUid);
         } catch (_) {
           // best-effort
@@ -324,6 +425,16 @@ class _IoMailService implements MailService {
   }
 
   @override
+  Future<void> restoreMessages({
+    required MailAccessCredentials credentials,
+    required List<int> uids,
+    required String userEmailAddress,
+  }) async {
+    // TODO: implement in next step
+    throw UnimplementedError('restoreMessages not yet implemented');
+  }
+
+  @override
   Future<void> close() async {
     _messageCache.clear();
     _activeCredentials = null;
@@ -366,19 +477,6 @@ class _IoMailService implements MailService {
     _client = nextClient;
     _activeCredentials = credentials;
     return nextClient;
-  }
-
-  SearchQueryType _mapSearchScope(MailSearchScope scope) {
-    switch (scope) {
-      case MailSearchScope.allText:
-        return SearchQueryType.allTextHeaders;
-      case MailSearchScope.subject:
-        return SearchQueryType.subject;
-      case MailSearchScope.from:
-        return SearchQueryType.from;
-      case MailSearchScope.to:
-        return SearchQueryType.to;
-    }
   }
 
   String _mapFolderToPath(MailFolder folder) {
