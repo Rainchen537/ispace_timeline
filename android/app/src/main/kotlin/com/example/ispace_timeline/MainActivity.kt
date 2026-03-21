@@ -1,5 +1,6 @@
 package com.example.ispace_timeline
 
+import android.content.ActivityNotFoundException
 import android.content.Context
 import android.app.DownloadManager
 import android.content.Intent
@@ -216,6 +217,39 @@ class MainActivity : FlutterActivity() {
                             cookieHeader = cookieHeader,
                             result = result,
                         )
+                    }
+                    "getMailAttachmentCacheDir" -> {
+                        val dir = File(applicationContext.cacheDir, "mail_attachments")
+                        dir.mkdirs()
+                        result.success(dir.absolutePath)
+                    }
+                    "openFile" -> {
+                        val filePath = call.argument<String>("path") ?: run {
+                            result.error("INVALID_PATH", "path required", null)
+                            return@setMethodCallHandler
+                        }
+                        val mimeType = call.argument<String>("mimeType") ?: "*/*"
+                        try {
+                            val file = File(filePath)
+                            val uri = FileProvider.getUriForFile(
+                                applicationContext,
+                                "${applicationContext.packageName}.fileprovider",
+                                file,
+                            )
+                            val intent = Intent(Intent.ACTION_VIEW).apply {
+                                setDataAndType(uri, mimeType)
+                                addFlags(
+                                    Intent.FLAG_GRANT_READ_URI_PERMISSION or
+                                        Intent.FLAG_ACTIVITY_NEW_TASK
+                                )
+                            }
+                            startActivity(intent)
+                            result.success(true)
+                        } catch (e: ActivityNotFoundException) {
+                            result.error("NO_APP", "没有可以打开此类型文件的应用", null)
+                        } catch (e: Exception) {
+                            result.error("open_failed", e.message, null)
+                        }
                     }
                     else -> result.notImplemented()
                 }

@@ -1,6 +1,8 @@
 import 'dart:async';
+import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:intl/intl.dart';
 
 import '../models/mail_models.dart';
@@ -317,6 +319,8 @@ class _MailPageState extends State<MailPage> {
               detail: detail,
               timeFormat: _detailTimeFormat,
               onReply: () => _openComposePage(replyTo: detail),
+              mailService: _mailService,
+              credentials: credentials,
             ),
           ),
         );
@@ -1777,19 +1781,62 @@ class _Avatar extends StatelessWidget {
 
 // ─── Mail Detail Page ─────────────────────────────────────────────────────────
 
-class _MailDetailPage extends StatelessWidget {
+class _MailDetailPage extends StatefulWidget {
   const _MailDetailPage({
     required this.detail,
     required this.timeFormat,
     required this.onReply,
+    required this.mailService,
+    required this.credentials,
   });
 
   final MailMessageDetail detail;
   final DateFormat timeFormat;
   final VoidCallback onReply;
+  final MailService mailService;
+  final MailAccessCredentials credentials;
+
+  @override
+  State<_MailDetailPage> createState() => _MailDetailPageState();
+}
+
+class _MailDetailPageState extends State<_MailDetailPage> {
+  final Set<String> _downloadingPartIds = {};
+  static const _nativeActions = MethodChannel('ispace/native_actions');
+
+  Future<void> _downloadAndOpen(MailAttachment attachment) async {
+    final partId = attachment.partId;
+    if (partId == null) return;
+    setState(() => _downloadingPartIds.add(partId));
+    try {
+      final bytes = await widget.mailService.downloadAttachment(
+        credentials: widget.credentials,
+        uid: widget.detail.uid,
+        partId: partId,
+      );
+      final cacheDirPath =
+          await _nativeActions.invokeMethod<String>('getMailAttachmentCacheDir');
+      final file = File('$cacheDirPath/${attachment.name}');
+      await file.writeAsBytes(bytes);
+      final mimeType = attachment.mimeType.split(';').first.trim();
+      await _nativeActions.invokeMethod<void>('openFile', {
+        'path': file.path,
+        'mimeType': mimeType.isEmpty ? '*/*' : mimeType,
+      });
+    } catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('下载失败：$error')),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _downloadingPartIds.remove(partId));
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
+    final detail = widget.detail;
     final htmlBody = detail.htmlBody?.trim() ?? '';
     final hasHtmlBody = htmlBody.isNotEmpty;
     return Scaffold(
@@ -1801,7 +1848,7 @@ class _MailDetailPage extends StatelessWidget {
         title: const Text('邮件详情'),
         actions: [
           IconButton(
-            onPressed: onReply,
+            onPressed: widget.onReply,
             icon: const Icon(Icons.reply_outlined),
             tooltip: '回复',
           ),
@@ -1835,8 +1882,35 @@ class _MailDetailPage extends StatelessWidget {
                   label: '时间',
                   value: detail.date == null
                       ? '未知时间'
-                      : timeFormat.format(detail.date!),
+                      : widget.timeFormat.format(detail.date!),
                 ),
+                if (detail.attachments.isNotEmpty) ...[
+                  const Divider(height: 16),
+                  const Text(
+                    '附件',
+                    style: TextStyle(
+                      fontSize: 11,
+                      color: Color(0xFF6B7280),
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                  const SizedBox(height: 6),
+                  Wrap(
+                    spacing: 8,
+                    runSpacing: 6,
+                    children: detail.attachments.map((att) {
+                      final isLoading =
+                          _downloadingPartIds.contains(att.partId);
+                      return _AttachmentChip(
+                        attachment: att,
+                        isLoading: isLoading,
+                        onTap:
+                            isLoading ? null : () => _downloadAndOpen(att),
+                      );
+                    }).toList(),
+                  ),
+                  const SizedBox(height: 4),
+                ],
               ],
             ),
           ),
@@ -1866,6 +1940,83 @@ class _MailDetailPage extends StatelessWidget {
                   ),
           ),
         ],
+      ),
+    );
+  }
+}
+
+class _AttachmentChip extends StatelessWidget {
+  const _AttachmentChip({
+    required this.attachment,
+    required this.isLoading,
+    required this.onTap,
+  });
+
+  final MailAttachment attachment;
+  final bool isLoading;
+  final VoidCallback? onTap;
+
+  static IconData _iconForName(String name) {
+    final lower = name.toLowerCase();
+    if (lower.endsWith('.pdf')) { return Icons.picture_as_pdf_outlined; }
+    if (lower.endsWith('.jpg') ||
+        lower.endsWith('.jpeg') ||
+        lower.endsWith('.png') ||
+        lower.endsWith('.gif') ||
+        lower.endsWith('.webp')) {
+      return Icons.image_outlined;
+    }
+    return Icons.attach_file_rounded;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: onTap,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+        decoration: BoxDecoration(
+          border: Border.all(color: const Color(0xFFD1D5DB)),
+          borderRadius: BorderRadius.circular(8),
+          color: Colors.white,
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(
+              _iconForName(attachment.name),
+              size: 16,
+              color: const Color(0xFF6B7280),
+            ),
+            const SizedBox(width: 6),
+            ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 160),
+              child: Text(
+                attachment.name,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(
+                  fontSize: 12,
+                  color: Color(0xFF374151),
+                  fontWeight: FontWeight.w500,
+                ),
+              ),
+            ),
+            const SizedBox(width: 6),
+            if (isLoading)
+              const SizedBox(
+                width: 14,
+                height: 14,
+                child: CircularProgressIndicator(strokeWidth: 2),
+              )
+            else
+              const Icon(
+                Icons.download_rounded,
+                size: 14,
+                color: Color(0xFF9CA3AF),
+              ),
+          ],
+        ),
       ),
     );
   }

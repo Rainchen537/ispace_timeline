@@ -3,4 +3,7 @@
     <cache-path
         name="shared_files"
         path="shared_files/" />
+    <cache-path
+        name="mail_attachments"
+        path="mail_attachments/" />
 </paths>
