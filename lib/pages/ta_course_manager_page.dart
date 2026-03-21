@@ -416,7 +416,7 @@ class _TaCourseEditorSheetState extends State<_TaCourseEditorSheet> {
               ),
               const SizedBox(height: 16),
               DropdownButtonFormField<int>(
-                value: _weekday,
+                initialValue: _weekday,
                 decoration: const InputDecoration(labelText: '星期'),
                 items: List<DropdownMenuItem<int>>.generate(7, (index) {
                   final weekday = index + 1;

@@ -38,9 +38,8 @@
 ```bash
 cd /Users/lixingchen/bnbu/ispace_timeline
 flutter pub get
-flutter run -d ios
-# 或
-flutter run -d android
+flutter run
+
 ```
 
 ## 安全说明
