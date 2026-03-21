@@ -45,37 +45,19 @@ class _IoMailService implements MailService {
         );
       }
 
-      // Calculate range for pagination (descending order)
-      final end = totalMessages - ((page - 1) * pageSize);
-      final start = totalMessages - (page * pageSize) + 1;
-      
-      final effectiveEnd = end < 1 ? 0 : end;
-      final effectiveStart = start < 1 ? 1 : start;
-
-      if (effectiveEnd < effectiveStart) {
-        return MailFolderSnapshot(
-          emailAddress: credentials.emailAddress,
-          incomingServer: _incomingServer,
-          outgoingServer: _outgoingServer,
-          messages: const [],
-          fetchedAt: DateTime.now(),
-          folder: folder,
-          totalMessages: totalMessages,
-          currentPage: page,
-          pageSize: pageSize,
-        );
-      }
-
+      // enough_mail's fetchMessages(count:, page:) handles the last-page
+      // boundary gracefully — it returns fewer messages when fewer exist.
       final messages = await client.fetchMessages(
-        count: effectiveEnd - effectiveStart + 1,
+        count: pageSize,
+        page: page,
         fetchPreference: FetchPreference.envelope,
       );
-      
+
       final validMessages = messages
           .where((message) => message.uid != null)
           .toList(growable: false)
         ..sort(_sortMessagesDesc);
-      
+
       // Update cache
       if (page == 1) {
         _messageCache.clear();
@@ -261,16 +243,25 @@ class _IoMailService implements MailService {
   }) async {
     try {
       final client = await _ensureConnected(credentials);
-      
-      final builder = MessageBuilder.prepareMultipartMixedMessage();
+
+      final MessageBuilder builder;
+      if (composeData.htmlBody != null) {
+        builder = MessageBuilder.prepareMultipartAlternativeMessage(
+          plainText: composeData.body,
+          htmlText: composeData.htmlBody!,
+        );
+      } else {
+        builder = MessageBuilder.prepareMultipartMixedMessage();
+        builder.addTextPlain(composeData.body);
+      }
+
       builder.from = [MailAddress(null, credentials.emailAddress)];
       builder.to = [MailAddress(null, composeData.to)];
       if (composeData.cc != null && composeData.cc!.isNotEmpty) {
         builder.cc = [MailAddress(null, composeData.cc!)];
       }
       builder.subject = composeData.subject;
-      builder.addTextPlain(composeData.body);
-      
+
       if (composeData.inReplyTo != null) {
         builder.addHeader('In-Reply-To', composeData.inReplyTo!);
       }
@@ -430,8 +421,90 @@ class _IoMailService implements MailService {
     required List<int> uids,
     required String userEmailAddress,
   }) async {
-    // TODO: implement in next step
-    throw UnimplementedError('restoreMessages not yet implemented');
+    if (uids.isEmpty) return;
+    try {
+      final client = await _ensureConnected(credentials);
+      final imapClient = client.lowLevelIncomingMailClient as ImapClient;
+
+      // Select trash so subsequent IMAP commands operate on it.
+      await client.selectMailboxByPath(_mapFolderToPath(MailFolder.trash));
+      final sequence = MessageSequence.fromIds(uids, isUid: true);
+
+      // Fetch FLAGS + FROM for each UID to determine the restore target folder.
+      final fetchResult = await imapClient.uidFetchMessages(
+        sequence,
+        '(FLAGS FROM)',
+      );
+
+      // Group UIDs by their inferred restore target folder.
+      final Map<String, List<int>> byFolder = {};
+      final Set<int> foundUids = {};
+      for (final msg in fetchResult.messages) {
+        final uid = msg.uid;
+        if (uid == null) continue;
+        foundUids.add(uid);
+        final targetPath = _inferRestoreFolder(msg, userEmailAddress);
+        byFolder.putIfAbsent(targetPath, () => []).add(uid);
+      }
+
+      // Any UIDs not returned by the server fall back to INBOX.
+      for (final uid in uids) {
+        if (!foundUids.contains(uid)) {
+          byFolder.putIfAbsent('INBOX', () => []).add(uid);
+        }
+      }
+
+      // UID COPY each group to its target folder.
+      for (final entry in byFolder.entries) {
+        if (entry.value.isEmpty) continue;
+        final groupSeq = MessageSequence.fromIds(entry.value, isUid: true);
+        await imapClient.uidCopy(groupSeq, targetMailboxPath: entry.key);
+      }
+
+      // Mark all restored messages as \Deleted in trash, then expunge only
+      // those UIDs (UID EXPUNGE via UIDPLUS extension) so we don't accidentally
+      // purge other messages that happen to carry \Deleted already.
+      await imapClient.uidStore(
+        sequence,
+        [MessageFlags.deleted],
+        action: StoreAction.add,
+        silent: true,
+      );
+      try {
+        await imapClient.uidExpunge(sequence);
+      } catch (_) {
+        // If the server doesn't support UIDPLUS, fall back to plain EXPUNGE.
+        await imapClient.expunge();
+      }
+
+      for (final uid in uids) {
+        _messageCache.remove(uid);
+      }
+    } catch (error) {
+      throw _mapError(error);
+    }
+  }
+
+  /// Infers the folder a trash message originally came from.
+  ///
+  /// Priority (checked in order):
+  ///   1. Message has `\Draft` flag → 'Drafts'
+  ///   2. FROM address matches [userEmailAddress] → 'Sent Messages'
+  ///   3. Otherwise → 'INBOX'
+  String _inferRestoreFolder(MimeMessage message, String userEmailAddress) {
+    final flags = message.flags;
+    if (flags != null && flags.contains(MessageFlags.draft)) {
+      return 'Drafts';
+    }
+    final from = message.from;
+    if (from != null) {
+      for (final addr in from) {
+        if (addr.email.toLowerCase() == userEmailAddress.toLowerCase()) {
+          return 'Sent Messages';
+        }
+      }
+    }
+    return 'INBOX';
   }
 
   @override

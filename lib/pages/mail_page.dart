@@ -785,6 +785,7 @@ class _MailPageState extends State<MailPage> {
   }
 
   Widget _buildMultiSelectBar() {
+    final isTrash = _currentFolder == MailFolder.trash;
     return SafeArea(
       child: Container(
         color: Colors.white,
@@ -806,6 +807,17 @@ class _MailPageState extends State<MailPage> {
                 height: 20,
                 child: CircularProgressIndicator(strokeWidth: 2),
               )
+            else if (isTrash)
+              FilledButton.icon(
+                style: FilledButton.styleFrom(
+                  backgroundColor: _selectedUids.isEmpty
+                      ? Colors.grey
+                      : const Color(0xFF2F80ED),
+                ),
+                onPressed: _selectedUids.isEmpty ? null : _restoreSelected,
+                icon: const Icon(Icons.restore, size: 16),
+                label: const Text('恢复'),
+              )
             else
               FilledButton.icon(
                 style: FilledButton.styleFrom(
@@ -820,6 +832,65 @@ class _MailPageState extends State<MailPage> {
         ),
       ),
     );
+  }
+
+  Future<void> _restoreSelected() async {
+    if (_selectedUids.isEmpty) return;
+    final credentials = await _getCredentials();
+    if (credentials == null) return;
+
+    if (!mounted) return;
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('确认恢复'),
+        content: Text('将已选 ${_selectedUids.length} 封邮件恢复到原文件夹？'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('取消'),
+          ),
+          TextButton(
+            style: TextButton.styleFrom(
+              foregroundColor: const Color(0xFF2F80ED),
+            ),
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('恢复'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+
+    setState(() => _isDeleting = true);
+    try {
+      final uids = _selectedUids.toList();
+      await _mailService.restoreMessages(
+        credentials: credentials,
+        uids: uids,
+        userEmailAddress: credentials.emailAddress,
+      );
+      if (!mounted) return;
+      final snapshot = _snapshot;
+      if (snapshot != null) {
+        setState(() {
+          _snapshot = snapshot.copyWith(
+            messages: snapshot.messages
+                .where((m) => !_selectedUids.contains(m.uid))
+                .toList(),
+          );
+          _isMultiSelectMode = false;
+          _selectedUids.clear();
+        });
+      }
+    } catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('恢复失败：$error')),
+      );
+    } finally {
+      if (mounted) setState(() => _isDeleting = false);
+    }
   }
 
   Widget _buildBody(
@@ -1140,14 +1211,51 @@ class _ComposeMailPageState extends State<ComposeMailPage> {
 
   MailComposeData _buildComposeData() {
     final replyTo = widget.replyTo;
+    final body = _bodyController.text;
+    final htmlBody = replyTo != null ? _buildReplyHtml(replyTo, body) : null;
     return MailComposeData(
       to: _toController.text.trim(),
       cc: _ccController.text.trim().isEmpty ? null : _ccController.text.trim(),
       subject: _subjectController.text.trim(),
-      body: _bodyController.text,
+      body: body,
+      htmlBody: htmlBody,
       inReplyTo: replyTo?.messageId,
       references: replyTo?.messageId,
     );
+  }
+
+  static String _buildReplyHtml(MailMessageDetail original, String userText) {
+    final dateStr = original.date != null
+        ? DateFormat('yyyy-MM-dd HH:mm').format(original.date!)
+        : '';
+    final escapedText = _escapeHtml(userText).replaceAll('\n', '<br>');
+    final originalBody = original.htmlBody != null
+        ? original.htmlBody!
+        : '<pre>${_escapeHtml(original.body)}</pre>';
+    return '''
+<div>$escapedText</div>
+<hr style="border:none;border-top:1px solid #d0d0d0;margin:16px 0">
+<div style="color:#666;font-size:0.9em;margin-bottom:8px;line-height:1.8">
+  <b>发件人：</b>${_escapeHtml(original.sender)}<br>
+  <b>时 间：</b>$dateStr<br>
+  <b>收件人：</b>${_escapeHtml(original.recipients)}<br>
+  <b>主 题：</b>${_escapeHtml(original.subject)}
+</div>
+<blockquote style="margin:0;padding-left:12px;border-left:3px solid #ccc;color:#444">
+  $originalBody
+</blockquote>
+''';
+  }
+
+  static String _escapeHtml(String s) => s
+      .replaceAll('&', '&amp;')
+      .replaceAll('<', '&lt;')
+      .replaceAll('>', '&gt;');
+
+  static String _truncateBody(String body) {
+    final normalized = body.replaceAll('\n', ' ').trim();
+    if (normalized.length <= 200) return normalized;
+    return '${normalized.substring(0, 200)}...';
   }
 
   Future<void> _sendEmail() async {
@@ -1304,11 +1412,52 @@ class _ComposeMailPageState extends State<ComposeMailPage> {
                   minLines: 12,
                   autofocus: isReply,
                 ),
+                if (isReply) _buildQuotedBlock(widget.replyTo!),
               ],
             ),
           ),
         ],
       ),
+    );
+  }
+
+  Widget _buildQuotedBlock(MailMessageDetail original) {
+    final dateStr = original.date != null
+        ? DateFormat('yyyy-MM-dd HH:mm').format(original.date!)
+        : '';
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const Divider(height: 24),
+        Container(
+          padding: const EdgeInsets.only(left: 12, top: 8, bottom: 8),
+          decoration: const BoxDecoration(
+            border: Border(
+              left: BorderSide(color: Color(0xFFD1D5DB), width: 3),
+            ),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              _QuoteInfoLine(label: '发件人', value: original.sender),
+              if (dateStr.isNotEmpty)
+                _QuoteInfoLine(label: '时　间', value: dateStr),
+              _QuoteInfoLine(label: '收件人', value: original.recipients),
+              _QuoteInfoLine(label: '主　题', value: original.subject),
+              const SizedBox(height: 8),
+              Text(
+                _truncateBody(original.body),
+                style: const TextStyle(
+                  fontSize: 13,
+                  height: 1.5,
+                  color: Color(0xFF374151),
+                ),
+              ),
+            ],
+          ),
+        ),
+        const SizedBox(height: 24),
+      ],
     );
   }
 
@@ -1717,6 +1866,35 @@ class _MailDetailPage extends StatelessWidget {
                   ),
           ),
         ],
+      ),
+    );
+  }
+}
+
+class _QuoteInfoLine extends StatelessWidget {
+  const _QuoteInfoLine({required this.label, required this.value});
+
+  final String label;
+  final String value;
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 2),
+      child: RichText(
+        text: TextSpan(
+          style: const TextStyle(fontSize: 12, color: Color(0xFF374151)),
+          children: [
+            TextSpan(
+              text: '$label：',
+              style: const TextStyle(
+                color: Color(0xFF6B7280),
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+            TextSpan(text: value),
+          ],
+        ),
       ),
     );
   }
