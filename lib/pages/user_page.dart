@@ -75,6 +75,27 @@ class _UserPageState extends State<UserPage> {
     );
   }
 
+  Future<void> _handleDeadlineReminderToggle(bool enabled) async {
+    final controller = widget.controller;
+    final message = await controller.setDeadlineReminderEnabled(enabled);
+    if (!mounted) {
+      return;
+    }
+
+    final messenger = ScaffoldMessenger.of(context);
+    messenger.hideCurrentSnackBar();
+    messenger.showSnackBar(
+      SnackBar(
+        content: Text(
+          message ??
+              (enabled
+                  ? 'DDL 提醒已开启，后续会按截止时间自动提醒。'
+                  : 'DDL 提醒已关闭，所有已排程通知已清除。'),
+        ),
+      ),
+    );
+  }
+
   void _handleLogout() {
     final controller = widget.controller;
     if (controller.isBusy) {
@@ -226,6 +247,15 @@ class _UserPageState extends State<UserPage> {
                     value: _versionLabel,
                     isValueLoading: _isLoadingVersion,
                     onTap: _showVersionSheet,
+                  ),
+                  _ActionTile(
+                    icon: Icons.notifications_active_outlined,
+                    title: 'ddl reminders',
+                    subtitle: '3d · 24h · 12h · 6h · 3h · 1h · 30m · 15m · 5m',
+                    switchValue: controller.isDeadlineReminderEnabled,
+                    isValueLoading: controller.isLoadingDeadlineReminderPreference,
+                    isBusy: controller.isUpdatingDeadlineReminder,
+                    onSwitchChanged: _handleDeadlineReminderToggle,
                   ),
                   _ActionTile(
                     icon: Icons.refresh_rounded,
@@ -572,20 +602,24 @@ class _ActionTile extends StatelessWidget {
     required this.title,
     required this.subtitle,
     this.value,
+    this.switchValue,
     this.isValueLoading = false,
     this.isBusy = false,
     this.isDanger = false,
     this.onTap,
+    this.onSwitchChanged,
   });
 
   final IconData icon;
   final String title;
   final String subtitle;
   final String? value;
+  final bool? switchValue;
   final bool isValueLoading;
   final bool isBusy;
   final bool isDanger;
   final VoidCallback? onTap;
+  final ValueChanged<bool>? onSwitchChanged;
 
   @override
   Widget build(BuildContext context) {
@@ -598,12 +632,15 @@ class _ActionTile extends StatelessWidget {
     final titleColor = isDanger
         ? const Color(0xFF8F232E)
         : const Color(0xFF15314D);
-    final enabled = onTap != null;
+    final enabled = onTap != null || onSwitchChanged != null;
+    final tapHandler = onSwitchChanged != null && switchValue != null
+        ? () => onSwitchChanged!(!switchValue!)
+        : onTap;
 
     return Material(
       color: Colors.white,
       child: InkWell(
-        onTap: onTap,
+        onTap: isBusy ? null : tapHandler,
         child: Padding(
           padding: const EdgeInsets.fromLTRB(20, 16, 20, 16),
           child: Row(
@@ -656,6 +693,11 @@ class _ActionTile extends StatelessWidget {
                   height: 18,
                   child: CircularProgressIndicator(strokeWidth: 2.2),
                 )
+              else if (switchValue != null)
+                Switch.adaptive(
+                  value: switchValue!,
+                  onChanged: onSwitchChanged,
+                )
               else if (value != null)
                 ConstrainedBox(
                   constraints: const BoxConstraints(maxWidth: 120),
@@ -672,7 +714,7 @@ class _ActionTile extends StatelessWidget {
                     ),
                   ),
                 ),
-              if (enabled) ...[
+              if (enabled && switchValue == null) ...[
                 const SizedBox(width: 6),
                 Icon(
                   Icons.chevron_right_rounded,

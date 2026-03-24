@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 
@@ -12,12 +14,21 @@ import '../models/timeline_item.dart';
 import '../models/upload_file_payload.dart';
 import '../models/web_session_snapshot.dart';
 import '../services/bnbu_mis_client.dart';
+import '../services/deadline_reminder_service.dart';
 import '../services/moodle_api_client.dart';
 
 class AppSessionController extends ChangeNotifier {
-  AppSessionController({MoodleApiClient? apiClient, BnbuMisClient? misClient})
+  AppSessionController({
+    MoodleApiClient? apiClient,
+    BnbuMisClient? misClient,
+    DeadlineReminderService? deadlineReminderService,
+  })
     : _apiClient = apiClient ?? MoodleApiClient(),
-      _misClient = misClient ?? BnbuMisClient();
+      _misClient = misClient ?? BnbuMisClient(),
+      _deadlineReminderService =
+          deadlineReminderService ?? DeadlineReminderService() {
+    unawaited(_restoreDeadlineReminderPreference());
+  }
 
   static const MethodChannel _credentialStoreChannel = MethodChannel(
     'ispace/credential_store',
@@ -25,6 +36,7 @@ class AppSessionController extends ChangeNotifier {
 
   final MoodleApiClient _apiClient;
   final BnbuMisClient _misClient;
+  final DeadlineReminderService _deadlineReminderService;
 
   AuthSession? _session;
   List<TimelineItem> _timelineItems = const [];
@@ -45,6 +57,9 @@ class AppSessionController extends ChangeNotifier {
   String? _password;
   bool _isRestoringSession = false;
   bool _didAttemptRestore = false;
+  bool _isDeadlineReminderEnabled = false;
+  bool _isLoadingDeadlineReminderPreference = true;
+  bool _isUpdatingDeadlineReminder = false;
   Future<AuthSession?>? _reloginFuture;
 
   AuthSession? get session => _session;
@@ -60,6 +75,10 @@ class AppSessionController extends ChangeNotifier {
   bool get isLoadingTimetable => _isLoadingTimetable;
   bool get isLoadingPortalProfile => _isLoadingPortalProfile;
   bool get isRestoringSession => _isRestoringSession;
+  bool get isDeadlineReminderEnabled => _isDeadlineReminderEnabled;
+  bool get isLoadingDeadlineReminderPreference =>
+      _isLoadingDeadlineReminderPreference;
+  bool get isUpdatingDeadlineReminder => _isUpdatingDeadlineReminder;
   bool get isBusy =>
       _isLoggingIn ||
       _isLoadingTimeline ||
@@ -223,6 +242,7 @@ class AppSessionController extends ChangeNotifier {
       });
       _timelineItems = items;
       notifyListeners();
+      unawaited(_syncDeadlineReminders(items));
     } on MoodleApiException catch (error) {
       _error = error.message;
       notifyListeners();
@@ -457,7 +477,46 @@ class AppSessionController extends ChangeNotifier {
     _portalProfileError = null;
     _timetableError = null;
     _clearSavedCredentials();
+    unawaited(_deadlineReminderService.cancelAll());
     notifyListeners();
+  }
+
+  Future<String?> setDeadlineReminderEnabled(bool enabled) async {
+    if (_isUpdatingDeadlineReminder) {
+      return 'DDL 提醒设置处理中，请稍后再试。';
+    }
+
+    _isUpdatingDeadlineReminder = true;
+    notifyListeners();
+
+    try {
+      if (!enabled) {
+        await _deadlineReminderService.disable();
+        _isDeadlineReminderEnabled = false;
+        return null;
+      }
+
+      final permissionError = await _deadlineReminderService.enable();
+      if (permissionError != null) {
+        _isDeadlineReminderEnabled = false;
+        return permissionError;
+      }
+
+      _isDeadlineReminderEnabled = true;
+      notifyListeners();
+
+      if (_timelineItems.isEmpty) {
+        await refreshTimeline();
+      } else {
+        await _syncDeadlineReminders(_timelineItems);
+      }
+      return null;
+    } catch (_) {
+      return enabled ? 'DDL 提醒开启失败，请稍后重试。' : 'DDL 提醒关闭失败，请稍后重试。';
+    } finally {
+      _isUpdatingDeadlineReminder = false;
+      notifyListeners();
+    }
   }
 
   Future<T> _withSessionRetry<T>(
@@ -527,6 +586,26 @@ class AppSessionController extends ChangeNotifier {
       return null;
     } catch (_) {
       return null;
+    }
+  }
+
+  Future<void> _restoreDeadlineReminderPreference() async {
+    try {
+      _isDeadlineReminderEnabled = await _deadlineReminderService.loadEnabled();
+    } finally {
+      _isLoadingDeadlineReminderPreference = false;
+      notifyListeners();
+    }
+  }
+
+  Future<void> _syncDeadlineReminders(List<TimelineItem> items) async {
+    if (!_isDeadlineReminderEnabled) {
+      return;
+    }
+    try {
+      await _deadlineReminderService.synchronize(items);
+    } catch (_) {
+      // Keep timeline refresh independent from reminder scheduling failures.
     }
   }
 
