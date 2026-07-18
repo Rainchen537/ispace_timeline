@@ -33,7 +33,8 @@
 - iPhone 16e 模拟器成功启动应用并显示登录页，系统安全存储、退出清除凭据和非官方客户端说明均正常呈现；未输入真实学校账号；
 - 本机 Android Gradle/JVM 对 `dl.google.com`、Maven Central 和 Flutter Storage 存在 TLS handshake 故障；验证时使用仓库外 `/tmp/ispace-*` 临时 Maven/Flutter artifact 缓存完成真实 Kotlin/Android 编译，这些临时文件未纳入 Git；
 - 未使用真实学校账号执行 Mail IMAP、真实 HTML 邮件、附件打开、logout 清理及 MIS/Portal SSO 的端到端验证；自动化测试禁止使用真实账号；
-- 远端 GitHub Actions 和 GitHub Pages 状态将在推送后补充。
+- GitHub Actions CI 运行 `29658287590` 成功：格式、静态分析、测试、Android debug APK 和 iOS 无签名构建均通过；
+- 隐私政策 Pages 工作流运行 `29658323587` 成功，仓库继续使用 GitHub Actions 发布并强制 HTTPS；已验证公开地址 `https://rainchen537.github.io/handsbnbu/` 返回本次更新内容。
 
 ### 已知限制
 
