@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../models/web_session_snapshot.dart';
+import '../services/native_actions.dart';
 import '../state/app_session_controller.dart';
 import '../widgets/native_mirror_webview.dart';
 
@@ -121,12 +122,13 @@ class _WebMirrorPageState extends State<WebMirrorPage> {
     }
     try {
       final fileName = _suggestedFileName(url, widget.title);
-      final cookieHeader = await _loadCookieHeader();
+      final (cookieHeader, cookieOrigin) = await _loadCookieHeader(url);
       await _nativeActionsChannel.invokeMethod('shareFile', {
         'url': url,
         'filename': fileName,
         'title': widget.title,
         if (cookieHeader.isNotEmpty) 'cookieHeader': cookieHeader,
+        if (cookieOrigin.isNotEmpty) 'cookieOrigin': cookieOrigin,
       });
     } on PlatformException {
       if (!mounted) {
@@ -138,15 +140,19 @@ class _WebMirrorPageState extends State<WebMirrorPage> {
     }
   }
 
-  Future<String> _loadCookieHeader() async {
+  Future<(String, String)> _loadCookieHeader(String targetUrl) async {
     try {
       final snapshot = await widget.controller.prepareWebSession();
-      return snapshot.cookies
+      if (!urlsHaveSameOrigin(targetUrl, snapshot.baseUrl)) {
+        return ('', '');
+      }
+      final header = snapshot.cookies
           .where((cookie) => cookie.name.trim().isNotEmpty)
           .map((cookie) => '${cookie.name}=${cookie.value}')
           .join('; ');
+      return (header, snapshot.baseUrl);
     } catch (_) {
-      return '';
+      return ('', '');
     }
   }
 

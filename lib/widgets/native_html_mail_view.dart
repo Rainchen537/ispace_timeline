@@ -18,6 +18,7 @@ class NativeHtmlMailView extends StatelessWidget {
   Widget build(BuildContext context) {
     final creationParams = <String, dynamic>{
       'htmlContent': htmlContent,
+      'isMailContent': true,
       if (baseUrl != null && baseUrl!.trim().isNotEmpty) 'baseUrl': baseUrl,
     };
 

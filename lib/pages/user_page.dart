@@ -88,24 +88,19 @@ class _UserPageState extends State<UserPage> {
       SnackBar(
         content: Text(
           message ??
-              (enabled
-                  ? 'DDL 提醒已开启，后续会按截止时间自动提醒。'
-                  : 'DDL 提醒已关闭，所有已排程通知已清除。'),
+              (enabled ? 'DDL 提醒已开启，后续会按截止时间自动提醒。' : 'DDL 提醒已关闭，所有已排程通知已清除。'),
         ),
       ),
     );
   }
 
-  void _handleLogout() {
+  Future<void> _handleLogout() async {
     final controller = widget.controller;
     if (controller.isBusy) {
       return;
     }
 
-    controller.logout();
-    ScaffoldMessenger.of(context)
-      ..hideCurrentSnackBar()
-      ..showSnackBar(const SnackBar(content: Text('已退出当前登录状态。')));
+    await controller.logout();
   }
 
   void _openPlaceholderPage({
@@ -253,7 +248,8 @@ class _UserPageState extends State<UserPage> {
                     title: 'ddl reminders',
                     subtitle: '3d · 24h · 12h · 6h · 3h · 1h · 30m · 15m · 5m',
                     switchValue: controller.isDeadlineReminderEnabled,
-                    isValueLoading: controller.isLoadingDeadlineReminderPreference,
+                    isValueLoading:
+                        controller.isLoadingDeadlineReminderPreference,
                     isBusy: controller.isUpdatingDeadlineReminder,
                     onSwitchChanged: _handleDeadlineReminderToggle,
                   ),
@@ -694,10 +690,7 @@ class _ActionTile extends StatelessWidget {
                   child: CircularProgressIndicator(strokeWidth: 2.2),
                 )
               else if (switchValue != null)
-                Switch.adaptive(
-                  value: switchValue!,
-                  onChanged: onSwitchChanged,
-                )
+                Switch.adaptive(value: switchValue!, onChanged: onSwitchChanged)
               else if (value != null)
                 ConstrainedBox(
                   constraints: const BoxConstraints(maxWidth: 120),

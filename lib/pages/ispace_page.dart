@@ -420,9 +420,7 @@ class _IspacePageState extends State<IspacePage> {
               text,
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
-              style: Theme.of(
-                context,
-              ).textTheme.bodyMedium?.copyWith(
+              style: Theme.of(context).textTheme.bodyMedium?.copyWith(
                 color: const Color(0xFF334155),
                 fontWeight: FontWeight.w600,
               ),
@@ -1304,7 +1302,7 @@ class _IspacePageState extends State<IspacePage> {
       courseName: 'BNBU Information Space',
       courseId: 1,
       instanceId: 78,
-      url: 'https://ispace.uic.edu.cn/mod/forum/view.php?id=78',
+      url: '${widget.controller.baseUrl}/mod/forum/view.php?id=78',
       sortTime: null,
       formattedTime: '',
       isOverdue: false,
@@ -1543,8 +1541,7 @@ class _IspacePageState extends State<IspacePage> {
       }
     }
 
-    if (!mounted ||
-        (restoredDateFilter == null && restoredSortMode == null)) {
+    if (!mounted || (restoredDateFilter == null && restoredSortMode == null)) {
       return;
     }
 

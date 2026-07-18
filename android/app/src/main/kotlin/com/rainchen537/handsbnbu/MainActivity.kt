@@ -1,4 +1,4 @@
-package com.example.ispace_timeline
+package com.rainchen537.handsbnbu
 
 import android.content.ActivityNotFoundException
 import android.content.Context
@@ -9,6 +9,7 @@ import android.os.Build
 import android.os.Environment
 import android.view.View
 import android.webkit.CookieManager
+import android.webkit.WebResourceRequest
 import android.webkit.WebSettings
 import android.webkit.URLUtil
 import android.webkit.WebView
@@ -24,6 +25,10 @@ import java.io.File
 import java.io.FileOutputStream
 import java.net.URL
 import java.net.URLConnection
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
+import java.util.TimeZone
 import kotlin.concurrent.thread
 
 class MainActivity : FlutterActivity() {
@@ -44,21 +49,7 @@ class MainActivity : FlutterActivity() {
             .setMethodCallHandler { call, result ->
                 val preferences = getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
                 when (call.method) {
-                    "saveCredentials" -> {
-                        val username = call.argument<String>("username").orEmpty()
-                        val password = call.argument<String>("password").orEmpty()
-                        if (username.isBlank() || password.isBlank()) {
-                            result.error("bad_args", "Missing username/password", null)
-                            return@setMethodCallHandler
-                        }
-                        preferences
-                            .edit()
-                            .putString(KEY_USERNAME, username)
-                            .putString(KEY_PASSWORD, password)
-                            .apply()
-                        result.success(true)
-                    }
-                    "loadCredentials" -> {
+                    "readLegacyCredentials" -> {
                         val username = preferences.getString(KEY_USERNAME, "").orEmpty()
                         val password = preferences.getString(KEY_PASSWORD, "").orEmpty()
                         if (username.isBlank() || password.isBlank()) {
@@ -72,12 +63,8 @@ class MainActivity : FlutterActivity() {
                             )
                         )
                     }
-                    "clearCredentials" -> {
-                        preferences
-                            .edit()
-                            .remove(KEY_USERNAME)
-                            .remove(KEY_PASSWORD)
-                            .apply()
+                    "clearLegacyCredentials" -> {
+                        preferences.edit().clear().apply()
                         result.success(true)
                     }
                     else -> result.notImplemented()
@@ -92,16 +79,23 @@ class MainActivity : FlutterActivity() {
                         val preferredFileName = call.argument<String>("filename").orEmpty()
                         val title = call.argument<String>("title").orEmpty()
                         val cookieHeader = call.argument<String>("cookieHeader").orEmpty()
+                        val cookieOrigin = call.argument<String>("cookieOrigin").orEmpty()
                         if (url.isNullOrBlank()) {
                             result.error("bad_args", "Missing url", null)
                             return@setMethodCallHandler
                         }
+                        if (!isHttpUrl(url)) {
+                            result.error("bad_args", "Only HTTP(S) downloads are supported", null)
+                            return@setMethodCallHandler
+                        }
                         try {
-                            val guessedName = if (preferredFileName.isNotBlank()) {
-                                preferredFileName
-                            } else {
-                                URLUtil.guessFileName(url, null, null)
-                            }
+                            val guessedName = sanitizeFileName(
+                                if (preferredFileName.isNotBlank()) {
+                                    preferredFileName
+                                } else {
+                                    URLUtil.guessFileName(url, null, null)
+                                }
+                            )
                             val request = DownloadManager.Request(Uri.parse(url)).apply {
                                 setAllowedOverMetered(true)
                                 setAllowedOverRoaming(true)
@@ -114,7 +108,10 @@ class MainActivity : FlutterActivity() {
                                 if (!mime.isNullOrBlank()) {
                                     setMimeType(mime)
                                 }
-                                if (cookieHeader.isNotBlank()) {
+                                if (
+                                    cookieHeader.isNotBlank() &&
+                                        urlsHaveSameOrigin(url, cookieOrigin)
+                                ) {
                                     addRequestHeader("Cookie", cookieHeader)
                                 } else {
                                     val cookie = CookieManager.getInstance().getCookie(url)
@@ -160,6 +157,7 @@ class MainActivity : FlutterActivity() {
                         val title = call.argument<String>("title").orEmpty()
                         val preferredFileName = call.argument<String>("filename").orEmpty()
                         val cookieHeader = call.argument<String>("cookieHeader").orEmpty()
+                        val cookieOrigin = call.argument<String>("cookieOrigin").orEmpty()
                         if (url.isNullOrBlank()) {
                             result.error("bad_args", "Missing url", null)
                             return@setMethodCallHandler
@@ -175,6 +173,7 @@ class MainActivity : FlutterActivity() {
                                 preferredFileName = guessedName,
                                 title = title,
                                 cookieHeader = cookieHeader,
+                                cookieOrigin = cookieOrigin,
                                 result = result,
                             )
                             return@setMethodCallHandler
@@ -201,6 +200,7 @@ class MainActivity : FlutterActivity() {
                         val preferredFileName = call.argument<String>("filename").orEmpty()
                         val title = call.argument<String>("title").orEmpty()
                         val cookieHeader = call.argument<String>("cookieHeader").orEmpty()
+                        val cookieOrigin = call.argument<String>("cookieOrigin").orEmpty()
                         if (url.isNullOrBlank()) {
                             result.error("bad_args", "Missing url", null)
                             return@setMethodCallHandler
@@ -215,8 +215,16 @@ class MainActivity : FlutterActivity() {
                             preferredFileName = guessedName,
                             title = title,
                             cookieHeader = cookieHeader,
+                            cookieOrigin = cookieOrigin,
                             result = result,
                         )
+                    }
+                    "clearWebSession" -> {
+                        val cookieManager = CookieManager.getInstance()
+                        cookieManager.removeAllCookies {
+                            cookieManager.flush()
+                            result.success(true)
+                        }
                     }
                     "getMailAttachmentCacheDir" -> {
                         val dir = File(applicationContext.cacheDir, "mail_attachments")
@@ -261,8 +269,13 @@ class MainActivity : FlutterActivity() {
         preferredFileName: String,
         title: String,
         cookieHeader: String,
+        cookieOrigin: String,
         result: MethodChannel.Result,
     ) {
+        if (!isHttpUrl(remoteUrl)) {
+            result.error("bad_args", "Only HTTP(S) file sharing is supported", null)
+            return
+        }
         thread {
             try {
                 val fileName = sanitizeFileName(preferredFileName)
@@ -270,12 +283,17 @@ class MainActivity : FlutterActivity() {
                 val targetFile = uniqueTargetFile(targetDir, fileName)
 
                 val connection = URL(remoteUrl).openConnection().apply {
+                    connectTimeout = 15_000
+                    readTimeout = 30_000
                     setRequestProperty(
                         "User-Agent",
                         "Mozilla/5.0 (Linux; Android) AppleWebKit/537.36 " +
                             "(KHTML, like Gecko) Chrome/123.0.0.0 Mobile Safari/537.36"
                     )
-                    val cookie = if (cookieHeader.isNotBlank()) {
+                    val cookie = if (
+                        cookieHeader.isNotBlank() &&
+                            urlsHaveSameOrigin(remoteUrl, cookieOrigin)
+                    ) {
                         cookieHeader
                     } else {
                         CookieManager.getInstance().getCookie(remoteUrl).orEmpty()
@@ -327,6 +345,34 @@ class MainActivity : FlutterActivity() {
         }
     }
 
+    private fun isHttpUrl(value: String): Boolean {
+        val uri = Uri.parse(value)
+        val scheme = uri.scheme?.lowercase()
+        return (scheme == "http" || scheme == "https") && !uri.host.isNullOrBlank()
+    }
+
+    private fun urlsHaveSameOrigin(first: String, second: String): Boolean {
+        if (!isHttpUrl(first) || !isHttpUrl(second)) {
+            return false
+        }
+        val left = Uri.parse(first)
+        val right = Uri.parse(second)
+        return left.scheme.equals(right.scheme, ignoreCase = true) &&
+            left.host.equals(right.host, ignoreCase = true) &&
+            effectivePort(left) == effectivePort(right)
+    }
+
+    private fun effectivePort(uri: Uri): Int {
+        if (uri.port != -1) {
+            return uri.port
+        }
+        return when (uri.scheme?.lowercase()) {
+            "http" -> 80
+            "https" -> 443
+            else -> -1
+        }
+    }
+
     private fun uniqueTargetFile(directory: File, originalName: String): File {
         val safeName = sanitizeFileName(originalName)
         val dotIndex = safeName.lastIndexOf('.')
@@ -352,8 +398,12 @@ class MainActivity : FlutterActivity() {
         if (trimmed.isEmpty()) {
             return "shared_file.bin"
         }
-        val sanitized = trimmed.replace(Regex("[\\\\/:*?\"<>|]"), "_")
-        return if (sanitized.isEmpty()) "shared_file.bin" else sanitized
+        val sanitized = trimmed.replace(Regex("[\\\\/:*?\"<>|\\x00-\\x1F]"), "_")
+        return if (sanitized.isEmpty() || sanitized == "." || sanitized == "..") {
+            "shared_file.bin"
+        } else {
+            sanitized
+        }
     }
 
     private fun shouldShareAsFile(url: String): Boolean {
@@ -388,23 +438,59 @@ private class IspaceNativeWebView(
     private val webView: WebView = WebView(context)
 
     init {
-        webView.settings.javaScriptEnabled = true
-        webView.settings.domStorageEnabled = true
+        val isMailContent = params["isMailContent"] as? Boolean == true
+        webView.settings.javaScriptEnabled = !isMailContent
+        webView.settings.domStorageEnabled = !isMailContent
         webView.settings.useWideViewPort = true
         webView.settings.loadWithOverviewMode = true
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
-            webView.settings.mixedContentMode = WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
+            webView.settings.mixedContentMode = if (isMailContent) {
+                WebSettings.MIXED_CONTENT_NEVER_ALLOW
+            } else {
+                WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
+            }
         }
-        webView.webViewClient = WebViewClient()
+        webView.webViewClient = object : WebViewClient() {
+            override fun shouldOverrideUrlLoading(
+                view: WebView?,
+                request: WebResourceRequest?,
+            ): Boolean {
+                if (!isMailContent || request?.isForMainFrame != true || !request.hasGesture()) {
+                    return false
+                }
+                val target = request.url ?: return true
+                if (target.scheme == "http" || target.scheme == "https") {
+                    try {
+                        context.startActivity(
+                            Intent(Intent.ACTION_VIEW, target)
+                                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                        )
+                    } catch (_: ActivityNotFoundException) {
+                        // Keep the untrusted page inside the blocked mail WebView.
+                    }
+                }
+                return true
+            }
+        }
 
         val cookieManager = CookieManager.getInstance()
         cookieManager.setAcceptCookie(true)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
-            cookieManager.setAcceptThirdPartyCookies(webView, true)
+            cookieManager.setAcceptThirdPartyCookies(webView, !isMailContent)
         }
 
         @Suppress("UNCHECKED_CAST")
-        val cookies = params["cookies"] as? List<Map<String, Any?>> ?: emptyList()
+        val initialUrl = (params["initialUrl"] as? String).orEmpty()
+        val htmlContent = (params["htmlContent"] as? String).orEmpty()
+        val baseUrl = (params["baseUrl"] as? String).orEmpty()
+        val fallbackCookieUrl = baseUrl.ifBlank { initialUrl }
+        val fallbackCookieHost = Uri.parse(fallbackCookieUrl).host.orEmpty()
+        val cookies = if (isMailContent) {
+            emptyList()
+        } else {
+            params["cookies"] as? List<Map<String, Any?>> ?: emptyList()
+        }
+        var didSetCookie = false
         for (cookie in cookies) {
             val name = cookie["name"] as? String ?: continue
             val value = cookie["value"] as? String ?: continue
@@ -416,21 +502,30 @@ private class IspaceNativeWebView(
                 ?.trimStart('.')
                 .orEmpty()
             val path = (cookie["path"] as? String)?.trim().orEmpty().ifEmpty { "/" }
-            val domainPart = if (domain.isEmpty()) "" else "Domain=$domain; "
-            val cookieString =
-                "$name=$value; ${domainPart}Path=$path; Secure; HttpOnly"
-            val target = if (domain.isEmpty()) {
-                "https://ispace.uic.edu.cn"
-            } else {
-                "https://$domain"
+            val hostOnly = cookie["hostOnly"] as? Boolean == true
+            val secure = cookie["secure"] as? Boolean == true
+            val expiresAt = (cookie["expiresAt"] as? Number)?.toLong()
+            if (
+                domain.isEmpty() ||
+                fallbackCookieHost.isEmpty() ||
+                !domain.equals(fallbackCookieHost, ignoreCase = true)
+            ) {
+                continue
             }
-            cookieManager.setCookie(target, cookieString)
+            val domainPart = if (hostOnly) "" else "Domain=$domain; "
+            val securePart = if (secure) "Secure; " else ""
+            val expiresPart = expiresAt?.let {
+                "Expires=${formatCookieExpires(it)}; "
+            }.orEmpty()
+            val cookieString =
+                "$name=$value; ${domainPart}Path=$path; $securePart${expiresPart}HttpOnly"
+            cookieManager.setCookie(fallbackCookieUrl, cookieString)
+            didSetCookie = true
         }
-        cookieManager.flush()
+        if (didSetCookie) {
+            cookieManager.flush()
+        }
 
-        val initialUrl = (params["initialUrl"] as? String).orEmpty()
-        val htmlContent = (params["htmlContent"] as? String).orEmpty()
-        val baseUrl = (params["baseUrl"] as? String).orEmpty()
         if (htmlContent.isNotBlank()) {
             webView.loadDataWithBaseURL(
                 baseUrl.ifBlank { null },
@@ -442,6 +537,15 @@ private class IspaceNativeWebView(
         } else if (initialUrl.isNotBlank()) {
             webView.loadUrl(initialUrl)
         }
+    }
+
+    private fun formatCookieExpires(epochMilliseconds: Long): String {
+        val formatter = SimpleDateFormat(
+            "EEE, dd MMM yyyy HH:mm:ss 'GMT'",
+            Locale.US,
+        )
+        formatter.timeZone = TimeZone.getTimeZone("GMT")
+        return formatter.format(Date(epochMilliseconds))
     }
 
     override fun getView(): View = webView

@@ -16,10 +16,8 @@ class TimetableData {
   final String selectedSemesterName;
   final List<TimetableCourse> courses;
 
-  int get totalMeetings => courses.fold<int>(
-    0,
-    (total, course) => total + course.meetings.length,
-  );
+  int get totalMeetings =>
+      courses.fold<int>(0, (total, course) => total + course.meetings.length);
 
   factory TimetableData.fromHtml(String source) {
     final document = html_parser.parse(source);
@@ -113,7 +111,10 @@ class TimetableData {
   }
 
   static String _normalize(String value) {
-    return value.replaceAll('\u00A0', ' ').replaceAll(RegExp(r'\s+'), ' ').trim();
+    return value
+        .replaceAll('\u00A0', ' ')
+        .replaceAll(RegExp(r'\s+'), ' ')
+        .trim();
   }
 }
 

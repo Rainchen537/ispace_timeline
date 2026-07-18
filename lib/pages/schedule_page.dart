@@ -21,8 +21,12 @@ class SchedulePage extends StatefulWidget {
 }
 
 class _SchedulePageState extends State<SchedulePage> {
-  static const String _showDeadlinesPreferenceKey = 'schedule.show_deadlines';
-  static const String _taCoursesPreferenceKey = 'schedule.ta_courses';
+  static const String _legacyShowDeadlinesPreferenceKey =
+      'schedule.show_deadlines';
+  static const String _legacyTaCoursesPreferenceKey = 'schedule.ta_courses';
+  static const String _showDeadlinesPreferenceKeyPrefix =
+      'schedule.show_deadlines.v2';
+  static const String _taCoursesPreferenceKeyPrefix = 'schedule.ta_courses.v2';
   static const List<Color> _coursePalette = <Color>[
     Color(0xFF0F766E),
     Color(0xFF2563EB),
@@ -101,6 +105,20 @@ class _SchedulePageState extends State<SchedulePage> {
   int _deadlineVisibilityVersion = 0;
   int _deadlineHintSerial = 0;
   int _weekTransitionDirection = 0;
+
+  String get _preferenceOwner {
+    final username = widget.controller.username?.trim().toLowerCase() ?? '';
+    if (username.isEmpty) {
+      return 'signed-out';
+    }
+    return base64Url.encode(utf8.encode(username));
+  }
+
+  String get _showDeadlinesPreferenceKey =>
+      '$_showDeadlinesPreferenceKeyPrefix.$_preferenceOwner';
+
+  String get _taCoursesPreferenceKey =>
+      '$_taCoursesPreferenceKeyPrefix.$_preferenceOwner';
 
   @override
   void initState() {
@@ -341,6 +359,7 @@ class _SchedulePageState extends State<SchedulePage> {
     try {
       final preferences = await _preferencesFuture;
       final persistedValue = preferences.getBool(_showDeadlinesPreferenceKey);
+      await preferences.remove(_legacyShowDeadlinesPreferenceKey);
       if (!mounted ||
           _deadlineVisibilityVersion != restoreVersion ||
           persistedValue == null ||
@@ -365,6 +384,7 @@ class _SchedulePageState extends State<SchedulePage> {
     try {
       final preferences = await _preferencesFuture;
       final rawJson = preferences.getString(_taCoursesPreferenceKey);
+      await preferences.remove(_legacyTaCoursesPreferenceKey);
       if (!mounted ||
           _taCoursesVersion != restoreVersion ||
           rawJson == null ||

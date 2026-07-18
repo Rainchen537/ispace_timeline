@@ -14,29 +14,32 @@ import '../models/timeline_item.dart';
 import '../models/upload_file_payload.dart';
 import '../models/web_session_snapshot.dart';
 import '../services/bnbu_mis_client.dart';
+import '../services/credential_store.dart';
 import '../services/deadline_reminder_service.dart';
 import '../services/moodle_api_client.dart';
+import '../services/native_actions.dart';
 
 class AppSessionController extends ChangeNotifier {
   AppSessionController({
     MoodleApiClient? apiClient,
     BnbuMisClient? misClient,
+    CredentialStore? credentialStore,
     DeadlineReminderService? deadlineReminderService,
-  })
-    : _apiClient = apiClient ?? MoodleApiClient(),
-      _misClient = misClient ?? BnbuMisClient(),
-      _deadlineReminderService =
-          deadlineReminderService ?? DeadlineReminderService() {
+    NativeActions? nativeActions,
+  }) : _apiClient = apiClient ?? MoodleApiClient(),
+       _misClient = misClient ?? BnbuMisClient(),
+       _credentialStore = credentialStore ?? SecureCredentialStore(),
+       _deadlineReminderService =
+           deadlineReminderService ?? DeadlineReminderService(),
+       _nativeActions = nativeActions ?? const NativeActions() {
     unawaited(_restoreDeadlineReminderPreference());
   }
 
-  static const MethodChannel _credentialStoreChannel = MethodChannel(
-    'ispace/credential_store',
-  );
-
   final MoodleApiClient _apiClient;
   final BnbuMisClient _misClient;
+  final CredentialStore _credentialStore;
   final DeadlineReminderService _deadlineReminderService;
+  final NativeActions _nativeActions;
 
   AuthSession? _session;
   List<TimelineItem> _timelineItems = const [];
@@ -45,6 +48,7 @@ class AppSessionController extends ChangeNotifier {
   PortalAccountProfile? _portalProfile;
   TimetableData? _timetable;
   bool _isLoggingIn = false;
+  bool _isLoggingOut = false;
   bool _isLoadingTimeline = false;
   bool _isLoadingCourses = false;
   bool _isLoadingRecentCourses = false;
@@ -61,6 +65,8 @@ class AppSessionController extends ChangeNotifier {
   bool _isLoadingDeadlineReminderPreference = true;
   bool _isUpdatingDeadlineReminder = false;
   Future<AuthSession?>? _reloginFuture;
+  Future<void> _credentialMutation = Future<void>.value();
+  int _authGeneration = 0;
 
   AuthSession? get session => _session;
   List<TimelineItem> get timelineItems => _timelineItems;
@@ -69,6 +75,7 @@ class AppSessionController extends ChangeNotifier {
   PortalAccountProfile? get portalProfile => _portalProfile;
   TimetableData? get timetable => _timetable;
   bool get isLoggingIn => _isLoggingIn;
+  bool get isLoggingOut => _isLoggingOut;
   bool get isLoadingTimeline => _isLoadingTimeline;
   bool get isLoadingCourses => _isLoadingCourses;
   bool get isLoadingRecentCourses => _isLoadingRecentCourses;
@@ -81,6 +88,7 @@ class AppSessionController extends ChangeNotifier {
   bool get isUpdatingDeadlineReminder => _isUpdatingDeadlineReminder;
   bool get isBusy =>
       _isLoggingIn ||
+      _isLoggingOut ||
       _isLoadingTimeline ||
       _isLoadingCourses ||
       _isLoadingRecentCourses ||
@@ -464,7 +472,31 @@ class AppSessionController extends ChangeNotifier {
     notifyListeners();
   }
 
-  void logout() {
+  Future<void> logout() async {
+    if (_isLoggingOut) {
+      return;
+    }
+
+    _authGeneration++;
+    _isLoggingOut = true;
+    _error = null;
+    notifyListeners();
+
+    final credentialsCleared = await _clearSavedCredentials();
+    var localSessionCleared = true;
+    try {
+      await Future.wait([
+        _deadlineReminderService.disable(),
+        _nativeActions.clearWebSession(),
+      ]);
+    } on MissingPluginException {
+      localSessionCleared = false;
+    } catch (_) {
+      localSessionCleared = false;
+    }
+    _apiClient.clearWebSession();
+    _misClient.clearSession();
+
     _session = null;
     _username = null;
     _password = null;
@@ -473,11 +505,13 @@ class AppSessionController extends ChangeNotifier {
     _recentCourses = const [];
     _portalProfile = null;
     _timetable = null;
-    _error = null;
     _portalProfileError = null;
     _timetableError = null;
-    _clearSavedCredentials();
-    unawaited(_deadlineReminderService.cancelAll());
+    _isDeadlineReminderEnabled = false;
+    _isLoggingOut = false;
+    if (!credentialsCleared || !localSessionCleared) {
+      _error = '已退出登录，但部分本地登录数据清理失败；请重启应用后再次退出。';
+    }
     notifyListeners();
   }
 
@@ -561,8 +595,9 @@ class AppSessionController extends ChangeNotifier {
   }
 
   Future<AuthSession?> _doRefreshSession() async {
+    final authGeneration = _authGeneration;
     final credentials = await _currentCredentials();
-    if (credentials == null) {
+    if (credentials == null || authGeneration != _authGeneration) {
       return null;
     }
     try {
@@ -570,6 +605,9 @@ class AppSessionController extends ChangeNotifier {
         username: credentials.$1,
         password: credentials.$2,
       );
+      if (authGeneration != _authGeneration || _session == null) {
+        return null;
+      }
       _persistSession(
         session: session,
         username: credentials.$1,
@@ -579,6 +617,9 @@ class AppSessionController extends ChangeNotifier {
         username: credentials.$1,
         password: credentials.$2,
       );
+      if (authGeneration != _authGeneration) {
+        return null;
+      }
       notifyListeners();
       return session;
     } on MoodleApiException {
@@ -639,40 +680,46 @@ class AppSessionController extends ChangeNotifier {
     required String password,
   }) async {
     try {
-      await _credentialStoreChannel.invokeMethod('saveCredentials', {
-        'username': username,
-        'password': password,
+      await _withCredentialMutation(() {
+        return _credentialStore.save(
+          StoredCredentials(username: username, password: password),
+        );
       });
-    } on PlatformException {
-      // Best-effort only.
+    } catch (_) {
+      // Login can continue when the platform secure store is unavailable.
     }
   }
 
   Future<(String, String)?> _loadSavedCredentials() async {
     try {
-      final raw = await _credentialStoreChannel.invokeMethod<dynamic>(
-        'loadCredentials',
-      );
-      if (raw is! Map) {
+      final credentials = await _credentialStore.load();
+      if (credentials == null) {
         return null;
       }
-      final data = raw.cast<dynamic, dynamic>();
-      final username = (data['username'] as String?)?.trim() ?? '';
-      final password = (data['password'] as String?) ?? '';
-      if (username.isEmpty || password.isEmpty) {
-        return null;
-      }
-      return (username, password);
-    } on PlatformException {
+      return (credentials.username, credentials.password);
+    } catch (_) {
       return null;
     }
   }
 
-  Future<void> _clearSavedCredentials() async {
+  Future<bool> _clearSavedCredentials() async {
     try {
-      await _credentialStoreChannel.invokeMethod('clearCredentials');
-    } on PlatformException {
-      // Best-effort only.
+      await _withCredentialMutation(_credentialStore.clear);
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  Future<T> _withCredentialMutation<T>(Future<T> Function() operation) async {
+    final previous = _credentialMutation;
+    final completer = Completer<void>();
+    _credentialMutation = completer.future;
+    await previous;
+    try {
+      return await operation();
+    } finally {
+      completer.complete();
     }
   }
 

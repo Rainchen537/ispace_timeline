@@ -22,12 +22,7 @@ class MailAccessCredentials {
   final String password;
 }
 
-enum MailFolder {
-  inbox,
-  sent,
-  drafts,
-  trash,
-}
+enum MailFolder { inbox, sent, drafts, trash }
 
 enum MailSearchScope { allText, subject, from, to }
 

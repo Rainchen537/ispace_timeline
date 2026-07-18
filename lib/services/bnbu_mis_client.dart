@@ -3,7 +3,9 @@ import 'dart:io';
 import 'dart:math';
 
 import 'package:dart_sm/dart_sm.dart';
+import 'package:flutter/foundation.dart';
 
+import '../config/app_config.dart';
 import '../models/portal_account_profile.dart';
 import '../models/timetable_data.dart';
 
@@ -24,15 +26,29 @@ class BnbuMisClient {
         'Chrome/145.0.0.0 Safari/537.36 Edg/145.0.0.0';
   }
 
-  static const String _ssoBaseUrl = 'https://sso.bnbu.edu.cn';
-  static const String _misBaseUrl = 'https://mis.bnbu.edu.cn';
-  static const String _portalBaseUrl = 'https://portal.bnbu.edu.cn';
-  static const String _misServiceId = '3bvkl8pks1ki04nirus0g';
-  static const String _portalServiceId = 'na3j8azrv30vamqac8yg';
-  static const String _misLaunchUrl =
+  static final String _ssoBaseUrl = AppConfig.normalizedBaseUrl(
+    AppConfig.bnbuSsoBaseUrl,
+  );
+  static final String _misBaseUrl = AppConfig.normalizedBaseUrl(
+    AppConfig.bnbuMisBaseUrl,
+  );
+  static final String _portalBaseUrl = AppConfig.normalizedBaseUrl(
+    AppConfig.bnbuPortalBaseUrl,
+  );
+  static final String _cookieDomain = AppConfig.normalizedCookieDomain(
+    AppConfig.bnbuCookieDomain,
+  );
+  static const String _misServiceId = AppConfig.bnbuMisServiceId;
+  static const String _portalServiceId = AppConfig.bnbuPortalServiceId;
+  static final String _misLaunchUrl =
       '$_ssoBaseUrl/auth/sso/ssoLogin?service=$_misServiceId';
-  static const String _portalLaunchUrl =
+  static final String _portalLaunchUrl =
       '$_ssoBaseUrl/auth/sso/ssoLogin?service=$_portalServiceId';
+  static final List<Uri> _trustedCookieOrigins = <Uri>[
+    Uri.parse(_ssoBaseUrl),
+    Uri.parse(_misBaseUrl),
+    Uri.parse(_portalBaseUrl),
+  ];
   static const String _htmlAcceptHeader = 'text/html,application/xhtml+xml,*/*';
 
   final HttpClient _httpClient = HttpClient();
@@ -41,6 +57,47 @@ class BnbuMisClient {
 
   void dispose() {
     _httpClient.close(force: true);
+  }
+
+  void clearSession() {
+    _cookieJar.clear();
+  }
+
+  @visibleForTesting
+  ({String method, String? body, Map<String, String> headers})
+  redirectRequestForTesting({
+    required String method,
+    required Uri currentUri,
+    required Uri targetUri,
+    required int statusCode,
+    String? body,
+    Map<String, String> headers = const <String, String>{},
+  }) {
+    final redirect = _prepareRedirect(
+      method: method,
+      currentUri: currentUri,
+      targetUri: targetUri,
+      statusCode: statusCode,
+      body: body,
+      headers: headers,
+    );
+    return (
+      method: redirect.method,
+      body: redirect.body,
+      headers: redirect.headers,
+    );
+  }
+
+  @visibleForTesting
+  void storeCookieForTesting(Cookie cookie, Uri origin) {
+    _storeCookies(<Cookie>[cookie], origin);
+  }
+
+  @visibleForTesting
+  String cookieHeaderForTesting(Uri target) {
+    return _matchingCookies(
+      target,
+    ).map((cookie) => '${cookie.name}=${cookie.value}').join('; ');
   }
 
   Future<TimetableData> fetchTimetable({
@@ -52,7 +109,7 @@ class BnbuMisClient {
     final timetableHtml = await _requestText(
       'GET',
       Uri.parse('$_misBaseUrl/mis/student/tts/timetable_min.do'),
-      headers: const <String, String>{
+      headers: <String, String>{
         'X-Requested-With': 'XMLHttpRequest',
         HttpHeaders.refererHeader: '$_misBaseUrl/mis/usr/index.do',
         HttpHeaders.acceptHeader: '*/*',
@@ -78,7 +135,7 @@ class BnbuMisClient {
         '$_portalBaseUrl/api/hrm/login/getAccountList'
         '?__random__=${DateTime.now().millisecondsSinceEpoch}',
       ),
-      headers: const <String, String>{
+      headers: <String, String>{
         HttpHeaders.acceptHeader: '*/*',
         'X-Requested-With': 'XMLHttpRequest',
         HttpHeaders.refererHeader: '$_portalBaseUrl/wui/index.html',
@@ -105,9 +162,7 @@ class BnbuMisClient {
     await _request(
       'GET',
       Uri.parse('$_ssoBaseUrl/'),
-      headers: const <String, String>{
-        HttpHeaders.acceptHeader: _htmlAcceptHeader,
-      },
+      headers: <String, String>{HttpHeaders.acceptHeader: _htmlAcceptHeader},
     );
 
     final publicKey = await _loadSm2PublicKey();
@@ -158,9 +213,7 @@ class BnbuMisClient {
       final response = await _request(
         'GET',
         candidate,
-        headers: const <String, String>{
-          HttpHeaders.acceptHeader: _htmlAcceptHeader,
-        },
+        headers: <String, String>{HttpHeaders.acceptHeader: _htmlAcceptHeader},
       );
       final settled = await _followHtmlRedirectPages(response);
       if (_looksLikeMisUri(settled.uri)) {
@@ -176,9 +229,7 @@ class BnbuMisClient {
     final indexResponse = await _request(
       'GET',
       Uri.parse('$_misBaseUrl/mis/usr/index.do'),
-      headers: const <String, String>{
-        HttpHeaders.acceptHeader: _htmlAcceptHeader,
-      },
+      headers: <String, String>{HttpHeaders.acceptHeader: _htmlAcceptHeader},
     );
     if (!_looksLikeMisUri(indexResponse.uri) ||
         !indexResponse.body.contains('BNBU MIS')) {
@@ -202,9 +253,7 @@ class BnbuMisClient {
       final response = await _request(
         'GET',
         candidate,
-        headers: const <String, String>{
-          HttpHeaders.acceptHeader: _htmlAcceptHeader,
-        },
+        headers: <String, String>{HttpHeaders.acceptHeader: _htmlAcceptHeader},
       );
       final settled = await _followHtmlRedirectPages(response);
       if (_looksLikePortalUri(settled.uri)) {
@@ -220,9 +269,7 @@ class BnbuMisClient {
     final indexResponse = await _request(
       'GET',
       Uri.parse('$_portalBaseUrl/wui/index.html'),
-      headers: const <String, String>{
-        HttpHeaders.acceptHeader: _htmlAcceptHeader,
-      },
+      headers: <String, String>{HttpHeaders.acceptHeader: _htmlAcceptHeader},
     );
     if (!_looksLikePortalUri(indexResponse.uri)) {
       throw BnbuMisException('统一门户会话建立失败，请重新登录后重试。');
@@ -241,11 +288,11 @@ class BnbuMisClient {
   }
 
   bool _looksLikeMisUri(Uri uri) {
-    return uri.host == Uri.parse(_misBaseUrl).host;
+    return _hasSameOrigin(uri, Uri.parse(_misBaseUrl));
   }
 
   bool _looksLikePortalUri(Uri uri) {
-    return uri.host == Uri.parse(_portalBaseUrl).host;
+    return _hasSameOrigin(uri, Uri.parse(_portalBaseUrl));
   }
 
   Future<_Response> _followHtmlRedirectPages(
@@ -264,9 +311,7 @@ class BnbuMisClient {
       current = await _request(
         'GET',
         current.uri.resolve(redirectPath),
-        headers: const <String, String>{
-          HttpHeaders.acceptHeader: _htmlAcceptHeader,
-        },
+        headers: <String, String>{HttpHeaders.acceptHeader: _htmlAcceptHeader},
       );
     }
     return current;
@@ -346,21 +391,25 @@ class BnbuMisClient {
     var currentMethod = method.toUpperCase();
     var currentUri = uri;
     var currentBody = body;
+    var currentHeaders = Map<String, String>.from(
+      headers ?? const <String, String>{},
+    );
 
     for (
       var redirectCount = 0;
       redirectCount <= redirectLimit;
       redirectCount++
     ) {
+      if (!_isHttpUri(currentUri)) {
+        throw BnbuMisException('请求跳转到了不受支持的地址。');
+      }
       final request = await _httpClient.openUrl(currentMethod, currentUri);
       request.followRedirects = false;
       request.headers.set(
         HttpHeaders.acceptLanguageHeader,
         'zh-CN,zh;q=0.9,en;q=0.8',
       );
-      if (headers != null) {
-        headers.forEach(request.headers.set);
-      }
+      currentHeaders.forEach(request.headers.set);
       for (final cookie in _matchingCookies(currentUri)) {
         request.cookies.add(cookie.toCookie());
       }
@@ -384,14 +433,19 @@ class BnbuMisClient {
             body: utf8.decode(bytes, allowMalformed: true),
           );
         }
-        currentUri = currentUri.resolve(location);
-        if (response.statusCode == HttpStatus.seeOther ||
-            ((response.statusCode == HttpStatus.movedTemporarily ||
-                    response.statusCode == HttpStatus.found) &&
-                currentMethod == 'POST')) {
-          currentMethod = 'GET';
-          currentBody = null;
-        }
+        final targetUri = currentUri.resolve(location);
+        final redirect = _prepareRedirect(
+          method: currentMethod,
+          currentUri: currentUri,
+          targetUri: targetUri,
+          statusCode: response.statusCode,
+          body: currentBody,
+          headers: currentHeaders,
+        );
+        currentUri = targetUri;
+        currentMethod = redirect.method;
+        currentBody = redirect.body;
+        currentHeaders = redirect.headers;
         continue;
       }
 
@@ -405,7 +459,96 @@ class BnbuMisClient {
     throw BnbuMisException('请求跳转过多，请稍后重试。');
   }
 
+  _RedirectRequest _prepareRedirect({
+    required String method,
+    required Uri currentUri,
+    required Uri targetUri,
+    required int statusCode,
+    required String? body,
+    required Map<String, String> headers,
+  }) {
+    if (!_isHttpUri(targetUri)) {
+      throw BnbuMisException('请求跳转到了不受支持的地址。');
+    }
+
+    var nextMethod = method.toUpperCase();
+    var nextBody = body;
+    final nextHeaders = Map<String, String>.from(headers);
+    if (statusCode == HttpStatus.seeOther ||
+        ((statusCode == HttpStatus.movedPermanently ||
+                statusCode == HttpStatus.found) &&
+            nextMethod == 'POST')) {
+      nextMethod = 'GET';
+      nextBody = null;
+    }
+
+    if (!_hasSameOrigin(currentUri, targetUri)) {
+      if (nextBody != null && nextBody.isNotEmpty) {
+        throw BnbuMisException('为保护登录信息，已拒绝跨来源转发请求内容。');
+      }
+      _removeSensitiveRedirectHeaders(nextHeaders);
+    }
+    if (nextBody == null || nextBody.isEmpty) {
+      _removeHeader(nextHeaders, HttpHeaders.contentTypeHeader);
+      _removeHeader(nextHeaders, HttpHeaders.contentLengthHeader);
+    }
+
+    return _RedirectRequest(
+      method: nextMethod,
+      body: nextBody,
+      headers: nextHeaders,
+    );
+  }
+
+  void _removeSensitiveRedirectHeaders(Map<String, String> headers) {
+    for (final name in <String>[
+      HttpHeaders.authorizationHeader,
+      HttpHeaders.cookieHeader,
+      HttpHeaders.proxyAuthorizationHeader,
+      HttpHeaders.refererHeader,
+      HttpHeaders.wwwAuthenticateHeader,
+      'origin',
+    ]) {
+      _removeHeader(headers, name);
+    }
+  }
+
+  void _removeHeader(Map<String, String> headers, String name) {
+    final normalizedName = name.toLowerCase();
+    headers.removeWhere((key, _) => key.toLowerCase() == normalizedName);
+  }
+
+  bool _isHttpUri(Uri uri) {
+    final scheme = uri.scheme.toLowerCase();
+    return (scheme == 'http' || scheme == 'https') && uri.host.isNotEmpty;
+  }
+
+  bool _hasSameOrigin(Uri left, Uri right) {
+    return left.scheme.toLowerCase() == right.scheme.toLowerCase() &&
+        left.host.toLowerCase() == right.host.toLowerCase() &&
+        _effectivePort(left) == _effectivePort(right);
+  }
+
+  bool _isTrustedCookieOrigin(Uri uri) {
+    return _trustedCookieOrigins.any((origin) => _hasSameOrigin(uri, origin));
+  }
+
+  int _effectivePort(Uri uri) {
+    if (uri.hasPort) {
+      return uri.port;
+    }
+    return switch (uri.scheme.toLowerCase()) {
+      'http' => 80,
+      'https' => 443,
+      _ => -1,
+    };
+  }
+
   Iterable<_StoredCookie> _matchingCookies(Uri uri) sync* {
+    if (!_isTrustedCookieOrigin(uri)) {
+      return;
+    }
+
     final now = DateTime.now();
     for (final cookie in _cookieJar) {
       if (cookie.isExpired(now)) {
@@ -418,9 +561,21 @@ class BnbuMisClient {
   }
 
   void _storeCookies(List<Cookie> cookies, Uri uri) {
+    if (!_isTrustedCookieOrigin(uri)) {
+      return;
+    }
+
     final now = DateTime.now();
     for (final cookie in cookies) {
-      final stored = _StoredCookie.fromCookie(cookie, uri);
+      final stored = _StoredCookie.fromCookie(
+        cookie,
+        uri,
+        trustedDomain: _cookieDomain,
+        now: now,
+      );
+      if (stored == null) {
+        continue;
+      }
       _cookieJar.removeWhere(
         (existing) =>
             existing.name == stored.name &&
@@ -490,12 +645,25 @@ class _Response {
   final String body;
 }
 
+class _RedirectRequest {
+  const _RedirectRequest({
+    required this.method,
+    required this.body,
+    required this.headers,
+  });
+
+  final String method;
+  final String? body;
+  final Map<String, String> headers;
+}
+
 class _StoredCookie {
-  _StoredCookie({
+  const _StoredCookie({
     required this.name,
     required this.value,
     required this.domain,
     required this.path,
+    required this.hostOnly,
     required this.secure,
     this.expires,
   });
@@ -504,22 +672,51 @@ class _StoredCookie {
   final String value;
   final String domain;
   final String path;
+  final bool hostOnly;
   final bool secure;
   final DateTime? expires;
 
-  factory _StoredCookie.fromCookie(Cookie cookie, Uri uri) {
-    final domain = (cookie.domain ?? '').trim().replaceFirst(
-      RegExp(r'^\.+'),
-      '',
-    );
-    final path = (cookie.path ?? '').trim();
+  static _StoredCookie? fromCookie(
+    Cookie cookie,
+    Uri uri, {
+    required String trustedDomain,
+    required DateTime now,
+  }) {
+    final originHost = uri.host.trim().toLowerCase();
+    final normalizedTrustedDomain = trustedDomain.trim().toLowerCase();
+    if (originHost.isEmpty) {
+      return null;
+    }
+    final rawDomain = (cookie.domain ?? '').trim().toLowerCase();
+    final normalizedDomain = rawDomain.replaceFirst(RegExp(r'^\.+'), '');
+    final hostOnly = normalizedDomain.isEmpty;
+    final domain = hostOnly ? originHost : normalizedDomain;
+    final isWithinTrustedDomain =
+        normalizedTrustedDomain.isNotEmpty &&
+        _domainMatches(originHost, normalizedTrustedDomain) &&
+        _domainMatches(domain, normalizedTrustedDomain);
+    if (domain.isEmpty ||
+        domain.endsWith('.') ||
+        (!hostOnly &&
+            (!_domainMatches(originHost, domain) ||
+                (domain != originHost && !isWithinTrustedDomain)))) {
+      return null;
+    }
+
+    final rawPath = (cookie.path ?? '').trim();
+    final path = rawPath.startsWith('/') ? rawPath : _defaultPath(uri);
+    final maxAge = cookie.maxAge;
+    final expires = maxAge == null
+        ? cookie.expires
+        : now.add(Duration(seconds: maxAge));
     return _StoredCookie(
       name: cookie.name,
       value: cookie.value,
-      domain: domain.isEmpty ? uri.host : domain,
-      path: path.isEmpty ? '/' : path,
+      domain: domain,
+      path: path,
+      hostOnly: hostOnly,
       secure: cookie.secure,
-      expires: cookie.expires,
+      expires: expires,
     );
   }
 
@@ -536,17 +733,40 @@ class _StoredCookie {
 
   bool matches(Uri uri) {
     final host = uri.host.toLowerCase();
-    final domainMatch =
-        host == domain.toLowerCase() ||
-        host.endsWith('.${domain.toLowerCase()}');
-    final pathMatch = uri.path.isEmpty
-        ? path == '/'
-        : uri.path.startsWith(path.isEmpty ? '/' : path);
-    final secureMatch = !secure || uri.scheme == 'https';
-    return domainMatch && pathMatch && secureMatch;
+    final domainMatch = hostOnly
+        ? host == domain
+        : _domainMatches(host, domain);
+    final secureMatch = !secure || uri.scheme.toLowerCase() == 'https';
+    return domainMatch && _pathMatches(uri.path, path) && secureMatch;
   }
 
   bool isExpired(DateTime now) {
-    return expires != null && expires!.isBefore(now);
+    return expires != null && !expires!.isAfter(now);
+  }
+
+  static bool _domainMatches(String host, String domain) {
+    return host == domain || host.endsWith('.$domain');
+  }
+
+  static bool _pathMatches(String requestPath, String cookiePath) {
+    final normalizedRequestPath = requestPath.isEmpty ? '/' : requestPath;
+    if (normalizedRequestPath == cookiePath) {
+      return true;
+    }
+    if (!normalizedRequestPath.startsWith(cookiePath)) {
+      return false;
+    }
+    return cookiePath.endsWith('/') ||
+        normalizedRequestPath.length > cookiePath.length &&
+            normalizedRequestPath[cookiePath.length] == '/';
+  }
+
+  static String _defaultPath(Uri origin) {
+    final requestPath = origin.path;
+    if (!requestPath.startsWith('/') || requestPath == '/') {
+      return '/';
+    }
+    final lastSlash = requestPath.lastIndexOf('/');
+    return lastSlash <= 0 ? '/' : requestPath.substring(0, lastSlash);
   }
 }

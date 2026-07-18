@@ -20,6 +20,7 @@ class NativeMirrorWebView extends StatelessWidget {
   Widget build(BuildContext context) {
     final creationParams = <String, dynamic>{
       'initialUrl': initialUrl,
+      'baseUrl': session.baseUrl,
       'cookies': session.cookies.map((cookie) => cookie.toMap()).toList(),
     };
 

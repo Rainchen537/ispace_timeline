@@ -562,12 +562,24 @@ class _TimelineDetailPageState extends State<TimelineDetailPage> {
   }
 
   String _buildIntroHtmlDocument(String rawHtml) {
+    final baseUri = Uri.tryParse(widget.controller.baseUrl);
+    final trustedOrigin =
+        baseUri?.hasScheme == true && baseUri?.host.isNotEmpty == true
+        ? baseUri!.origin
+        : '';
+    final mediaSources = trustedOrigin.isEmpty
+        ? 'data:'
+        : 'data: $trustedOrigin';
     return '''
 <!doctype html>
 <html>
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'none'; img-src $mediaSources; media-src $mediaSources; style-src 'unsafe-inline'; font-src data:; connect-src 'none'; frame-src 'none'; form-action 'none'; base-uri 'none'"
+    >
     <style>
       body {
         margin: 0;

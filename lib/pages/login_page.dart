@@ -75,11 +75,10 @@ class _LoginPageState extends State<LoginPage> {
               final heroHeight = (constraints.maxHeight * 0.31)
                   .clamp(210.0, 280.0)
                   .toDouble();
-              final footerTopSpacing = (constraints.maxHeight -
-                      heroHeight -
-                      340)
-                  .clamp(44.0, 180.0)
-                  .toDouble();
+              final footerTopSpacing =
+                  (constraints.maxHeight - heroHeight - 340)
+                      .clamp(44.0, 180.0)
+                      .toDouble();
 
               return Stack(
                 children: [
@@ -276,10 +275,8 @@ class _LoginPageState extends State<LoginPage> {
                 fontWeight: FontWeight.w700,
               ),
             ),
-            TextSpan(
-              text: '您的密码只用来获取临时cookie 我们不会存储您的个人信息\n',
-            ),
-            TextSpan(text: '如果遇到使用问题 可以报告给 '),
+            TextSpan(text: '登录凭据仅保存在设备系统安全存储中，用于恢复登录；退出登录会清除凭据。\n'),
+            TextSpan(text: '本应用为非官方客户端。使用问题可反馈至 '),
             TextSpan(
               text: 'v530026091@mail.bnbu.edu.cn',
               style: TextStyle(

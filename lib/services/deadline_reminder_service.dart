@@ -18,7 +18,8 @@ class DeadlineReminderService {
   static const String _enabledPreferenceKey = 'deadline_reminders.enabled';
   static const String _channelId = 'ddl_reminders';
   static const String _channelName = 'DDL reminders';
-  static const String _channelDescription = 'Upcoming iSpace deadline reminders';
+  static const String _channelDescription =
+      'Upcoming iSpace deadline reminders';
   static const int _iosPendingNotificationLimit = 64;
   static const List<_ReminderSpec> _reminderSpecs = <_ReminderSpec>[
     _ReminderSpec(Duration(days: 3), '3 days'),
@@ -156,13 +157,13 @@ class DeadlineReminderService {
           .resolvePlatformSpecificImplementation<
             AndroidFlutterLocalNotificationsPlugin
           >();
-      final notificationsGranted =
-          await androidPlugin?.requestNotificationsPermission();
+      final notificationsGranted = await androidPlugin
+          ?.requestNotificationsPermission();
       if (notificationsGranted == false) {
         return '未授予系统通知权限，DDL 提醒未开启。';
       }
-      final exactAlarmGranted =
-          await androidPlugin?.requestExactAlarmsPermission();
+      final exactAlarmGranted = await androidPlugin
+          ?.requestExactAlarmsPermission();
       if (exactAlarmGranted == false) {
         return '未授予精确提醒权限，DDL 提醒未开启。';
       }
@@ -171,7 +172,9 @@ class DeadlineReminderService {
 
     if (Platform.isIOS) {
       final iosPlugin = _notificationsPlugin
-          .resolvePlatformSpecificImplementation<IOSFlutterLocalNotificationsPlugin>();
+          .resolvePlatformSpecificImplementation<
+            IOSFlutterLocalNotificationsPlugin
+          >();
       final granted = await iosPlugin?.requestPermissions(
         alert: true,
         badge: false,

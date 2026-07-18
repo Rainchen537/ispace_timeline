@@ -2,12 +2,13 @@ import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'package:intl/intl.dart';
 
+import '../config/app_config.dart';
 import '../models/mail_models.dart';
 import '../services/mail_service.dart';
 import '../services/mail_service_factory.dart';
+import '../services/native_actions.dart';
 import '../state/app_session_controller.dart';
 import '../widgets/native_html_mail_view.dart';
 
@@ -15,8 +16,8 @@ import '../widgets/native_html_mail_view.dart';
 
 class MailPage extends StatefulWidget {
   const MailPage({super.key, required this.controller})
-      : _mailService = null,
-        _testCredentials = null;
+    : _mailService = null,
+      _testCredentials = null;
 
   /// Test-only constructor that injects a mock service and fake credentials.
   @visibleForTesting
@@ -25,8 +26,8 @@ class MailPage extends StatefulWidget {
     required this.controller,
     required MailService mailService,
     required MailAccessCredentials? testCredentials,
-  })  : _mailService = mailService,
-        _testCredentials = testCredentials;
+  }) : _mailService = mailService,
+       _testCredentials = testCredentials;
 
   final AppSessionController? controller;
   final MailService? _mailService;
@@ -251,9 +252,9 @@ class _MailPageState extends State<MailPage> {
       setState(() => _searchResults = results);
     } catch (error) {
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('搜索失败：$error')),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('搜索失败：$error')));
     } finally {
       if (mounted) setState(() => _isSearching = false);
     }
@@ -327,9 +328,9 @@ class _MailPageState extends State<MailPage> {
       }
     } catch (error) {
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(error.toString())),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(error.toString())));
     } finally {
       if (mounted) setState(() => _openingMessageUid = null);
     }
@@ -352,10 +353,12 @@ class _MailPageState extends State<MailPage> {
   void _markMessageAsSeen(int uid) {
     final snapshot = _snapshot;
     if (snapshot == null) return;
-    final updated = snapshot.messages.map((msg) {
-      if (msg.uid != uid) return msg;
-      return msg.copyWith(isSeen: true);
-    }).toList(growable: false);
+    final updated = snapshot.messages
+        .map((msg) {
+          if (msg.uid != uid) return msg;
+          return msg.copyWith(isSeen: true);
+        })
+        .toList(growable: false);
     setState(() => _snapshot = snapshot.copyWith(messages: updated));
   }
 
@@ -425,9 +428,9 @@ class _MailPageState extends State<MailPage> {
       }
     } catch (error) {
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('删除失败：$error')),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('删除失败：$error')));
     } finally {
       if (mounted) setState(() => _isDeleting = false);
     }
@@ -443,7 +446,8 @@ class _MailPageState extends State<MailPage> {
   Widget build(BuildContext context) {
     final visible = _visibleMessages;
     final snapshot = _snapshot;
-    final hasMore = !_isSearching &&
+    final hasMore =
+        !_isSearching &&
         _searchResults == null &&
         snapshot != null &&
         snapshot.currentPage * snapshot.pageSize < snapshot.totalMessages;
@@ -453,14 +457,12 @@ class _MailPageState extends State<MailPage> {
       floatingActionButton: _isMultiSelectMode
           ? null
           : FloatingActionButton(
-              onPressed:
-                  _credentials == null ? null : () => _openComposePage(),
+              onPressed: _credentials == null ? null : () => _openComposePage(),
               backgroundColor: const Color(0xFF2F80ED),
               foregroundColor: Colors.white,
               child: const Icon(Icons.edit_outlined),
             ),
-      bottomNavigationBar:
-          _isMultiSelectMode ? _buildMultiSelectBar() : null,
+      bottomNavigationBar: _isMultiSelectMode ? _buildMultiSelectBar() : null,
       body: SafeArea(
         child: Column(
           children: [
@@ -538,8 +540,10 @@ class _MailPageState extends State<MailPage> {
                   color: Color(0xFF9CA3AF),
                   size: 18,
                 ),
-          prefixIconConstraints:
-              const BoxConstraints(minWidth: 40, minHeight: 38),
+          prefixIconConstraints: const BoxConstraints(
+            minWidth: 40,
+            minHeight: 38,
+          ),
           hintText: '搜索',
           hintStyle: const TextStyle(
             color: Color(0xFF9CA3AF),
@@ -649,10 +653,7 @@ class _MailPageState extends State<MailPage> {
                   isDense: true,
                   contentPadding: EdgeInsets.symmetric(vertical: 8),
                   hintText: '输入邮箱地址...',
-                  hintStyle: TextStyle(
-                    fontSize: 12,
-                    color: Color(0xFFD1D5DB),
-                  ),
+                  hintStyle: TextStyle(fontSize: 12, color: Color(0xFFD1D5DB)),
                 ),
                 style: const TextStyle(fontSize: 12, color: Color(0xFF111827)),
                 keyboardType: TextInputType.emailAddress,
@@ -699,22 +700,10 @@ class _MailPageState extends State<MailPage> {
                   _refreshFolder();
                 },
                 itemBuilder: (context) => const [
-                  PopupMenuItem(
-                    value: MailFolder.inbox,
-                    child: Text('收件箱'),
-                  ),
-                  PopupMenuItem(
-                    value: MailFolder.drafts,
-                    child: Text('草稿箱'),
-                  ),
-                  PopupMenuItem(
-                    value: MailFolder.sent,
-                    child: Text('已发送'),
-                  ),
-                  PopupMenuItem(
-                    value: MailFolder.trash,
-                    child: Text('已删除'),
-                  ),
+                  PopupMenuItem(value: MailFolder.inbox, child: Text('收件箱')),
+                  PopupMenuItem(value: MailFolder.drafts, child: Text('草稿箱')),
+                  PopupMenuItem(value: MailFolder.sent, child: Text('已发送')),
+                  PopupMenuItem(value: MailFolder.trash, child: Text('已删除')),
                 ],
                 child: Row(
                   mainAxisSize: MainAxisSize.min,
@@ -825,8 +814,9 @@ class _MailPageState extends State<MailPage> {
             else
               FilledButton.icon(
                 style: FilledButton.styleFrom(
-                  backgroundColor:
-                      _selectedUids.isEmpty ? Colors.grey : Colors.red,
+                  backgroundColor: _selectedUids.isEmpty
+                      ? Colors.grey
+                      : Colors.red,
                 ),
                 onPressed: _selectedUids.isEmpty ? null : _deleteSelected,
                 icon: const Icon(Icons.delete_outline, size: 16),
@@ -889,9 +879,9 @@ class _MailPageState extends State<MailPage> {
       }
     } catch (error) {
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('恢复失败：$error')),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('恢复失败：$error')));
     } finally {
       if (mounted) setState(() => _isDeleting = false);
     }
@@ -911,10 +901,7 @@ class _MailPageState extends State<MailPage> {
     }
 
     if (_snapshot == null) {
-      return _buildEmptyState(
-        title: '暂无邮件',
-        subtitle: '下拉或点击右上角刷新后读取邮箱。',
-      );
+      return _buildEmptyState(title: '暂无邮件', subtitle: '下拉或点击右上角刷新后读取邮箱。');
     }
 
     return Column(
@@ -946,8 +933,8 @@ class _MailPageState extends State<MailPage> {
                           subtitle: _searchQuery.isNotEmpty
                               ? '换个关键词试试。'
                               : _showUnreadOnly
-                                  ? '当前没有未读邮件。'
-                                  : '该文件夹没有邮件。',
+                              ? '当前没有未读邮件。'
+                              : '该文件夹没有邮件。',
                         ),
                       ),
                     ],
@@ -1000,10 +987,7 @@ class _MailPageState extends State<MailPage> {
                 height: 20,
                 child: CircularProgressIndicator(strokeWidth: 2),
               )
-            : TextButton(
-                onPressed: _loadMore,
-                child: const Text('加载更多'),
-              ),
+            : TextButton(onPressed: _loadMore, child: const Text('加载更多')),
       ),
     );
   }
@@ -1049,12 +1033,14 @@ class _MailPageState extends State<MailPage> {
   String _formatMessageTime(DateTime? dateTime) {
     if (dateTime == null) return '';
     final now = DateTime.now();
-    final isSameDay = dateTime.year == now.year &&
+    final isSameDay =
+        dateTime.year == now.year &&
         dateTime.month == now.month &&
         dateTime.day == now.day;
     if (isSameDay) return DateFormat('HH:mm').format(dateTime);
     final yesterday = now.subtract(const Duration(days: 1));
-    final isYesterday = dateTime.year == yesterday.year &&
+    final isYesterday =
+        dateTime.year == yesterday.year &&
         dateTime.month == yesterday.month &&
         dateTime.day == yesterday.day;
     if (isYesterday) return '昨天';
@@ -1136,16 +1122,18 @@ class _ComposeMailPageState extends State<ComposeMailPage> {
 
     if (draft != null) {
       // Continue editing an existing draft
-      _toController =
-          TextEditingController(text: _extractEmail(draft.recipients));
+      _toController = TextEditingController(
+        text: _extractEmail(draft.recipients),
+      );
       _ccController = TextEditingController(text: draft.cc ?? '');
       _subjectController = TextEditingController(text: draft.subject);
       _bodyController = TextEditingController(text: draft.body);
       _draftUid = draft.uid;
     } else if (replyTo != null) {
       // Reply
-      _toController =
-          TextEditingController(text: _extractEmail(replyTo.sender));
+      _toController = TextEditingController(
+        text: _extractEmail(replyTo.sender),
+      );
       _ccController = TextEditingController();
       _subjectController = TextEditingController(
         text: replyTo.subject.startsWith('Re:')
@@ -1265,9 +1253,9 @@ class _ComposeMailPageState extends State<ComposeMailPage> {
   Future<void> _sendEmail() async {
     final to = _toController.text.trim();
     if (to.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('请填写收件人')),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('请填写收件人')));
       return;
     }
     _draftTimer?.cancel();
@@ -1290,21 +1278,22 @@ class _ComposeMailPageState extends State<ComposeMailPage> {
       }
       if (!mounted) return;
       Navigator.of(context).pop();
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('邮件已发送')),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('邮件已发送')));
     } catch (error) {
       if (!mounted) return;
       setState(() => _isSending = false);
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('发送失败：$error')),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('发送失败：$error')));
     }
   }
 
   Future<void> _onCancel() async {
     _draftTimer?.cancel();
-    final hasContent = _toController.text.isNotEmpty ||
+    final hasContent =
+        _toController.text.isNotEmpty ||
         _subjectController.text.isNotEmpty ||
         _bodyController.text.isNotEmpty;
     if (_hasChanges && hasContent) {
@@ -1398,10 +1387,7 @@ class _ComposeMailPageState extends State<ComposeMailPage> {
                 const Divider(height: 1),
                 _ComposeField(label: '抄送', controller: _ccController),
                 const Divider(height: 1),
-                _ComposeField(
-                  label: '主题',
-                  controller: _subjectController,
-                ),
+                _ComposeField(label: '主题', controller: _subjectController),
                 const Divider(height: 1),
                 const SizedBox(height: 12),
                 TextField(
@@ -1541,9 +1527,7 @@ class _ScopeChip extends StatelessWidget {
           color: selected ? const Color(0xFF2F80ED) : Colors.white,
           borderRadius: BorderRadius.circular(20),
           border: Border.all(
-            color: selected
-                ? const Color(0xFF2F80ED)
-                : const Color(0xFFD1D5DB),
+            color: selected ? const Color(0xFF2F80ED) : const Color(0xFFD1D5DB),
           ),
         ),
         child: Text(
@@ -1572,8 +1556,7 @@ class _TopAction extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final color =
-        selected ? const Color(0xFF2F80ED) : const Color(0xFF9CA3AF);
+    final color = selected ? const Color(0xFF2F80ED) : const Color(0xFF9CA3AF);
     return Row(
       mainAxisSize: MainAxisSize.min,
       children: [
@@ -1802,7 +1785,7 @@ class _MailDetailPage extends StatefulWidget {
 
 class _MailDetailPageState extends State<_MailDetailPage> {
   final Set<String> _downloadingPartIds = {};
-  static const _nativeActions = MethodChannel('ispace/native_actions');
+  static const _nativeActions = NativeActions();
 
   Future<void> _downloadAndOpen(MailAttachment attachment) async {
     final partId = attachment.partId;
@@ -1814,20 +1797,33 @@ class _MailDetailPageState extends State<_MailDetailPage> {
         uid: widget.detail.uid,
         partId: partId,
       );
-      final cacheDirPath =
-          await _nativeActions.invokeMethod<String>('getMailAttachmentCacheDir');
-      final file = File('$cacheDirPath/${attachment.name}');
-      await file.writeAsBytes(bytes);
+      final cacheDirPath = await _nativeActions
+          .getMailAttachmentCacheDirectory();
+      final fileName = mailAttachmentCacheFileName(
+        messageUid: widget.detail.uid,
+        partId: partId,
+        originalName: attachment.name,
+      );
+      final file = File('$cacheDirPath/$fileName');
+      final temporaryFile = File('${file.path}.partial');
+      try {
+        await temporaryFile.writeAsBytes(bytes, flush: true);
+        await temporaryFile.rename(file.path);
+      } finally {
+        if (await temporaryFile.exists()) {
+          await temporaryFile.delete();
+        }
+      }
       final mimeType = attachment.mimeType.split(';').first.trim();
-      await _nativeActions.invokeMethod<void>('openFile', {
-        'path': file.path,
-        'mimeType': mimeType.isEmpty ? '*/*' : mimeType,
-      });
+      await _nativeActions.openFile(
+        path: file.path,
+        mimeType: mimeType.isEmpty ? '*/*' : mimeType,
+      );
     } catch (error) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('下载失败：$error')),
-        );
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('下载失败：$error')));
       }
     } finally {
       if (mounted) setState(() => _downloadingPartIds.remove(partId));
@@ -1899,13 +1895,13 @@ class _MailDetailPageState extends State<_MailDetailPage> {
                     spacing: 8,
                     runSpacing: 6,
                     children: detail.attachments.map((att) {
-                      final isLoading =
-                          _downloadingPartIds.contains(att.partId);
+                      final isLoading = _downloadingPartIds.contains(
+                        att.partId,
+                      );
                       return _AttachmentChip(
                         attachment: att,
                         isLoading: isLoading,
-                        onTap:
-                            isLoading ? null : () => _downloadAndOpen(att),
+                        onTap: isLoading ? null : () => _downloadAndOpen(att),
                       );
                     }).toList(),
                   ),
@@ -1919,16 +1915,16 @@ class _MailDetailPageState extends State<_MailDetailPage> {
             child: hasHtmlBody
                 ? NativeHtmlMailView(
                     htmlContent: htmlBody,
-                    baseUrl: 'https://mail.bnbu.edu.cn/',
+                    baseUrl: AppConfig.normalizedBaseUrl(
+                      AppConfig.mailWebBaseUrl,
+                    ),
                   )
                 : SelectionArea(
                     child: ListView(
                       padding: const EdgeInsets.fromLTRB(16, 12, 16, 24),
                       children: [
                         Text(
-                          detail.body.isEmpty
-                              ? '这封邮件没有可解析的正文内容。'
-                              : detail.body,
+                          detail.body.isEmpty ? '这封邮件没有可解析的正文内容。' : detail.body,
                           style: const TextStyle(
                             fontSize: 14,
                             height: 1.65,
@@ -1958,7 +1954,9 @@ class _AttachmentChip extends StatelessWidget {
 
   static IconData _iconForName(String name) {
     final lower = name.toLowerCase();
-    if (lower.endsWith('.pdf')) { return Icons.picture_as_pdf_outlined; }
+    if (lower.endsWith('.pdf')) {
+      return Icons.picture_as_pdf_outlined;
+    }
     if (lower.endsWith('.jpg') ||
         lower.endsWith('.jpeg') ||
         lower.endsWith('.png') ||

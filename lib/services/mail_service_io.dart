@@ -4,14 +4,15 @@ import 'package:enough_mail/enough_mail.dart';
 import 'package:html/dom.dart' as dom;
 import 'package:html/parser.dart' as html_parser;
 
+import '../config/app_config.dart';
 import '../models/mail_models.dart';
 import 'mail_service.dart';
 
 MailService createPlatformMailService() => _IoMailService();
 
 class _IoMailService implements MailService {
-  static const String _incomingServer = 'imap.exmail.qq.com';
-  static const String _outgoingServer = 'smtp.exmail.qq.com';
+  static const String _incomingServer = AppConfig.mailIncomingServer;
+  static const String _outgoingServer = AppConfig.mailOutgoingServer;
   static const int _downloadSizeLimit = 64 * 1024;
 
   MailClient? _client;
@@ -29,7 +30,7 @@ class _IoMailService implements MailService {
       final client = await _ensureConnected(credentials);
       final folderPath = _mapFolderToPath(folder);
       final mailFolder = await client.selectMailboxByPath(folderPath);
-      
+
       final totalMessages = mailFolder.messagesExists;
       if (totalMessages == 0) {
         return MailFolderSnapshot(
@@ -53,10 +54,11 @@ class _IoMailService implements MailService {
         fetchPreference: FetchPreference.envelope,
       );
 
-      final validMessages = messages
-          .where((message) => message.uid != null)
-          .toList(growable: false)
-        ..sort(_sortMessagesDesc);
+      final validMessages =
+          messages
+              .where((message) => message.uid != null)
+              .toList(growable: false)
+            ..sort(_sortMessagesDesc);
 
       // Update cache
       if (page == 1) {
@@ -107,12 +109,13 @@ class _IoMailService implements MailService {
         fetchPreference: FetchPreference.envelope,
       );
 
-      final summaries = messages
-          .where((m) => m.uid != null)
-          .where((m) => _messageMatchesSearch(m, lowerQuery, searchScope))
-          .map(_toSummary)
-          .toList(growable: false)
-        ..sort(_sortSummariesDesc);
+      final summaries =
+          messages
+              .where((m) => m.uid != null)
+              .where((m) => _messageMatchesSearch(m, lowerQuery, searchScope))
+              .map(_toSummary)
+              .toList(growable: false)
+            ..sort(_sortSummariesDesc);
 
       return summaries;
     } catch (error) {
@@ -229,7 +232,7 @@ class _IoMailService implements MailService {
       final part = allParts[index];
       // Force fetch full content if not already available
       await client.fetchMessageContents(message);
-      
+
       return part.decodeContentBinary() ?? const [];
     } catch (error) {
       throw _mapError(error);
@@ -352,10 +355,9 @@ class _IoMailService implements MailService {
       if (existingDraftUid != null) {
         try {
           await client.selectMailboxByPath(_mapFolderToPath(MailFolder.drafts));
-          final draftSeq = MessageSequence.fromIds(
-            [existingDraftUid],
-            isUid: true,
-          );
+          final draftSeq = MessageSequence.fromIds([
+            existingDraftUid,
+          ], isUid: true);
           // Use UID STORE \Deleted + EXPUNGE directly to avoid enough_mail's
           // deleteMessages(expunge:true) bug which uses STORE (not UID STORE).
           final imapClient = client.lowLevelIncomingMailClient as ImapClient;
@@ -585,20 +587,25 @@ class _IoMailService implements MailService {
     final cc = _joinAddresses(message.cc);
     final plainText = _extractPlainText(message);
     final htmlBody = _buildRenderableHtml(message);
-    
+
     final attachments = <MailAttachment>[];
     final allParts = message.allPartsFlat;
     for (var i = 0; i < allParts.length; i++) {
       final part = allParts[i];
-      final contentDisposition = part.decodeHeaderValue('Content-Disposition')?.toLowerCase() ?? '';
+      final contentDisposition =
+          part.decodeHeaderValue('Content-Disposition')?.toLowerCase() ?? '';
       if (contentDisposition.contains('attachment')) {
-        attachments.add(MailAttachment(
-          name: part.decodeFileName() ?? '未命名附件',
-          size: 0, 
-          mimeType: part.decodeHeaderValue('Content-Type') ?? 'application/octet-stream',
-          contentId: part.decodeHeaderValue('Content-ID'),
-          partId: i.toString(),
-        ));
+        attachments.add(
+          MailAttachment(
+            name: part.decodeFileName() ?? '未命名附件',
+            size: 0,
+            mimeType:
+                part.decodeHeaderValue('Content-Type') ??
+                'application/octet-stream',
+            contentId: part.decodeHeaderValue('Content-ID'),
+            partId: i.toString(),
+          ),
+        );
       }
     }
 
@@ -659,13 +666,15 @@ class _IoMailService implements MailService {
     if (addresses == null || addresses.isEmpty) {
       return '';
     }
-    return addresses.map((address) {
-      final personalName = address.personalName?.trim() ?? '';
-      if (personalName.isNotEmpty) {
-        return '$personalName <${address.email}>';
-      }
-      return address.email;
-    }).join('，');
+    return addresses
+        .map((address) {
+          final personalName = address.personalName?.trim() ?? '';
+          if (personalName.isNotEmpty) {
+            return '$personalName <${address.email}>';
+          }
+          return address.email;
+        })
+        .join('，');
   }
 
   String _buildPreview(String plainText) {
@@ -706,16 +715,22 @@ class _IoMailService implements MailService {
       return '';
     }
     final parsed = html_parser.parse(htmlText);
+    for (final element in parsed.querySelectorAll(
+      'script,iframe,object,embed,base,form,meta[http-equiv="refresh"]',
+    )) {
+      element.remove();
+    }
     final headInnerHtml = parsed.head?.innerHtml.trim() ?? '';
     final bodyInnerHtml = parsed.body?.innerHtml.trim().isNotEmpty == true
         ? parsed.body!.innerHtml
-        : htmlText;
+        : (parsed.documentElement?.innerHtml ?? '');
     return '''
 <!DOCTYPE html>
 <html>
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src data: cid:; style-src 'unsafe-inline'; font-src data:; connect-src 'none'; media-src 'none'; frame-src 'none'; form-action 'none'; base-uri 'none'">
     $headInnerHtml
     <style>
       html, body {
@@ -767,8 +782,9 @@ class _IoMailService implements MailService {
           '\n',
         );
     final parsed = html_parser.parse(normalizedHtml);
-    for (final element
-        in parsed.querySelectorAll('script,style,head,title,meta,link')) {
+    for (final element in parsed.querySelectorAll(
+      'script,style,head,title,meta,link',
+    )) {
       element.remove();
     }
     final text = _flattenHtmlText(parsed.body ?? parsed.documentElement);
@@ -846,9 +862,7 @@ class _IoMailService implements MailService {
       if (message.contains('auth') ||
           message.contains('login') ||
           message.contains('password')) {
-        return const MailServiceException(
-          '邮箱登录失败，请确认当前账号已开通邮箱，且邮箱密码与登录密码一致。',
-        );
+        return const MailServiceException('邮箱登录失败，请确认当前账号已开通邮箱，且邮箱密码与登录密码一致。');
       }
       final readableMessage = error.message?.trim();
       if (readableMessage != null && readableMessage.isNotEmpty) {

@@ -1,12 +1,14 @@
 import Flutter
 import Foundation
+import MobileCoreServices
 import UIKit
 import WebKit
 
 @main
-@objc class AppDelegate: FlutterAppDelegate {
+@objc class AppDelegate: FlutterAppDelegate, UIDocumentInteractionControllerDelegate {
   private let credentialUserDefaultsKeyUser = "ispace.saved_username"
   private let credentialUserDefaultsKeyPass = "ispace.saved_password"
+  private var documentInteractionController: UIDocumentInteractionController?
 
   override func application(
     _ application: UIApplication,
@@ -31,22 +33,7 @@ import WebKit
           return
         }
         switch call.method {
-        case "saveCredentials":
-          guard
-            let args = call.arguments as? [String: Any],
-            let username = args["username"] as? String,
-            let password = args["password"] as? String
-          else {
-            result(
-              FlutterError(code: "bad_args", message: "Missing username/password", details: call.arguments)
-            )
-            return
-          }
-          let defaults = UserDefaults.standard
-          defaults.set(username, forKey: self.credentialUserDefaultsKeyUser)
-          defaults.set(password, forKey: self.credentialUserDefaultsKeyPass)
-          result(true)
-        case "loadCredentials":
+        case "readLegacyCredentials":
           let defaults = UserDefaults.standard
           let username = defaults.string(forKey: self.credentialUserDefaultsKeyUser) ?? ""
           let password = defaults.string(forKey: self.credentialUserDefaultsKeyPass) ?? ""
@@ -58,7 +45,7 @@ import WebKit
             "username": username,
             "password": password,
           ])
-        case "clearCredentials":
+        case "clearLegacyCredentials":
           let defaults = UserDefaults.standard
           defaults.removeObject(forKey: self.credentialUserDefaultsKeyUser)
           defaults.removeObject(forKey: self.credentialUserDefaultsKeyPass)
@@ -93,10 +80,12 @@ import WebKit
           }
           let preferredName = (args["filename"] as? String) ?? ""
           let cookieHeader = (args["cookieHeader"] as? String) ?? ""
+          let cookieOrigin = (args["cookieOrigin"] as? String) ?? ""
           self.downloadFile(
             from: remoteUrl,
             preferredFileName: preferredName,
-            cookieHeader: cookieHeader
+            cookieHeader: cookieHeader,
+            cookieOrigin: cookieOrigin
           ) { downloadResult in
             switch downloadResult {
             case .success(let localUrl):
@@ -141,11 +130,13 @@ import WebKit
           let title = (args["title"] as? String) ?? ""
           let preferredName = (args["filename"] as? String) ?? ""
           let cookieHeader = (args["cookieHeader"] as? String) ?? ""
+          let cookieOrigin = (args["cookieOrigin"] as? String) ?? ""
           if self.shouldShareAsFile(urlString), let remoteUrl = URL(string: urlString) {
             self.downloadFile(
               from: remoteUrl,
               preferredFileName: preferredName,
-              cookieHeader: cookieHeader
+              cookieHeader: cookieHeader,
+              cookieOrigin: cookieOrigin
             ) { downloadResult in
               switch downloadResult {
               case .success(let localUrl):
@@ -178,10 +169,12 @@ import WebKit
           }
           let preferredName = (args["filename"] as? String) ?? ""
           let cookieHeader = (args["cookieHeader"] as? String) ?? ""
+          let cookieOrigin = (args["cookieOrigin"] as? String) ?? ""
           self.downloadFile(
             from: remoteUrl,
             preferredFileName: preferredName,
-            cookieHeader: cookieHeader
+            cookieHeader: cookieHeader,
+            cookieOrigin: cookieOrigin
           ) { downloadResult in
             switch downloadResult {
             case .success(let localUrl):
@@ -196,6 +189,44 @@ import WebKit
               )
             }
           }
+        case "clearWebSession":
+          let dataStore = WKWebsiteDataStore.default()
+          dataStore.removeData(
+            ofTypes: WKWebsiteDataStore.allWebsiteDataTypes(),
+            modifiedSince: .distantPast
+          ) {
+            result(true)
+          }
+        case "getMailAttachmentCacheDir":
+          do {
+            let directory = try self.mailAttachmentCacheDirectory()
+            result(directory.path)
+          } catch {
+            result(
+              FlutterError(
+                code: "cache_directory_failed",
+                message: error.localizedDescription,
+                details: nil
+              )
+            )
+          }
+        case "openFile":
+          guard
+            let args = call.arguments as? [String: Any],
+            let path = args["path"] as? String,
+            !path.isEmpty
+          else {
+            result(
+              FlutterError(code: "bad_args", message: "Missing path", details: call.arguments)
+            )
+            return
+          }
+          let mimeType = (args["mimeType"] as? String) ?? "application/octet-stream"
+          self.openFile(
+            at: URL(fileURLWithPath: path),
+            mimeType: mimeType,
+            result: result
+          )
         default:
           result(FlutterMethodNotImplemented)
         }
@@ -203,6 +234,111 @@ import WebKit
     }
     GeneratedPluginRegistrant.register(with: self)
     return super.application(application, didFinishLaunchingWithOptions: launchOptions)
+  }
+
+  private func mailAttachmentCacheDirectory() throws -> URL {
+    let cacheRoot = FileManager.default.urls(
+      for: .cachesDirectory,
+      in: .userDomainMask
+    ).first!
+    let directory = cacheRoot.appendingPathComponent(
+      "mail_attachments",
+      isDirectory: true
+    )
+    try FileManager.default.createDirectory(
+      at: directory,
+      withIntermediateDirectories: true
+    )
+    return directory
+  }
+
+  private func openFile(
+    at url: URL,
+    mimeType: String,
+    result: @escaping FlutterResult
+  ) {
+    guard FileManager.default.fileExists(atPath: url.path) else {
+      result(
+        FlutterError(code: "file_not_found", message: "文件不存在", details: url.path)
+      )
+      return
+    }
+
+    DispatchQueue.main.async {
+      guard self.documentInteractionController == nil else {
+        result(
+          FlutterError(
+            code: "presentation_in_progress",
+            message: "已有文件打开菜单，请先关闭后重试。",
+            details: nil
+          )
+        )
+        return
+      }
+      guard let presenter = self.topViewController() else {
+        result(
+          FlutterError(
+            code: "no_presenter",
+            message: "No view controller available to open the file",
+            details: nil
+          )
+        )
+        return
+      }
+      let sourceView = presenter.view!
+
+      let controller = UIDocumentInteractionController(url: url)
+      controller.delegate = self
+      if let typeIdentifier = self.typeIdentifier(
+        mimeType: mimeType,
+        fileExtension: url.pathExtension
+      ) {
+        controller.uti = typeIdentifier
+      }
+      self.documentInteractionController = controller
+      let presented = controller.presentOptionsMenu(
+        from: sourceView.bounds,
+        in: sourceView,
+        animated: true
+      )
+      if presented {
+        result(true)
+      } else {
+        self.documentInteractionController = nil
+        result(
+          FlutterError(
+            code: "no_app",
+            message: "没有可以打开此类型文件的应用",
+            details: nil
+          )
+        )
+      }
+    }
+  }
+
+  private func typeIdentifier(mimeType: String, fileExtension: String) -> String? {
+    let normalizedMimeType = mimeType.trimmingCharacters(in: .whitespacesAndNewlines)
+    if !normalizedMimeType.isEmpty, normalizedMimeType != "*/*",
+      let value = UTTypeCreatePreferredIdentifierForTag(
+        kUTTagClassMIMEType,
+        normalizedMimeType as CFString,
+        nil
+      )?.takeRetainedValue()
+    {
+      return value as String
+    }
+
+    let normalizedExtension = fileExtension.trimmingCharacters(in: .whitespacesAndNewlines)
+    if !normalizedExtension.isEmpty,
+      let value = UTTypeCreatePreferredIdentifierForTag(
+        kUTTagClassFilenameExtension,
+        normalizedExtension as CFString,
+        nil
+      )?.takeRetainedValue()
+    {
+      return value as String
+    }
+    return nil
   }
 
   private func topViewController(base: UIViewController? = nil) -> UIViewController? {
@@ -253,11 +389,25 @@ import WebKit
     from remoteUrl: URL,
     preferredFileName: String,
     cookieHeader: String,
+    cookieOrigin: String,
     completion: @escaping (Result<URL, Error>) -> Void
   ) {
+    guard isHttpUrl(remoteUrl) else {
+      completion(
+        .failure(
+          NSError(
+            domain: "ispace.native_actions",
+            code: -2,
+            userInfo: [NSLocalizedDescriptionKey: "仅支持 HTTP(S) 文件下载"]
+          )
+        )
+      )
+      return
+    }
+
     var request = URLRequest(url: remoteUrl)
     let extraCookie = cookieHeader.trimmingCharacters(in: .whitespacesAndNewlines)
-    if !extraCookie.isEmpty {
+    if !extraCookie.isEmpty, urlsHaveSameOrigin(remoteUrl, cookieOrigin) {
       request.setValue(extraCookie, forHTTPHeaderField: "Cookie")
     } else if
       let cookies = HTTPCookieStorage.shared.cookies(for: remoteUrl),
@@ -269,7 +419,13 @@ import WebKit
       }
     }
 
-    URLSession.shared.downloadTask(with: request) { [weak self] tempUrl, response, error in
+    let configuration = URLSessionConfiguration.ephemeral
+    configuration.timeoutIntervalForRequest = 30
+    configuration.timeoutIntervalForResource = 120
+    configuration.httpShouldSetCookies = false
+    let session = URLSession(configuration: configuration)
+    session.downloadTask(with: request) { [weak self] tempUrl, response, error in
+      defer { session.finishTasksAndInvalidate() }
       if let error {
         completion(.failure(error))
         return
@@ -302,6 +458,34 @@ import WebKit
     }.resume()
   }
 
+  private func isHttpUrl(_ url: URL) -> Bool {
+    let scheme = url.scheme?.lowercased()
+    return (scheme == "http" || scheme == "https") && url.host?.isEmpty == false
+  }
+
+  private func urlsHaveSameOrigin(_ target: URL, _ originString: String) -> Bool {
+    guard let origin = URL(string: originString), isHttpUrl(target), isHttpUrl(origin) else {
+      return false
+    }
+    return target.scheme?.caseInsensitiveCompare(origin.scheme ?? "") == .orderedSame
+      && target.host?.caseInsensitiveCompare(origin.host ?? "") == .orderedSame
+      && effectivePort(target) == effectivePort(origin)
+  }
+
+  private func effectivePort(_ url: URL) -> Int {
+    if let port = url.port {
+      return port
+    }
+    switch url.scheme?.lowercased() {
+    case "http":
+      return 80
+    case "https":
+      return 443
+    default:
+      return -1
+    }
+  }
+
   private func uniqueDestinationURL(in directory: URL, fileName: String) -> URL {
     let base = (fileName as NSString).deletingPathExtension
     let ext = (fileName as NSString).pathExtension
@@ -329,8 +513,9 @@ import WebKit
       return "download.bin"
     }
     let invalid = CharacterSet(charactersIn: "/\\?%*|\"<>:")
+      .union(.controlCharacters)
     value = value.components(separatedBy: invalid).joined(separator: "_")
-    if value.isEmpty {
+    if value.isEmpty || value == "." || value == ".." {
       return "download.bin"
     }
     return value
@@ -347,6 +532,32 @@ import WebKit
     }
     let pattern = #"\.(pdf|ppt|pptx|doc|docx|xls|xlsx|zip|rar|7z|jpg|jpeg|png|gif|webp|mp4|mp3)(\?|$)"#
     return lower.range(of: pattern, options: .regularExpression) != nil
+  }
+
+  func documentInteractionControllerDidDismissOptionsMenu(
+    _ controller: UIDocumentInteractionController
+  ) {
+    releaseDocumentInteractionController(controller)
+  }
+
+  func documentInteractionControllerDidDismissOpenInMenu(
+    _ controller: UIDocumentInteractionController
+  ) {
+    releaseDocumentInteractionController(controller)
+  }
+
+  func documentInteractionControllerDidEndPreview(
+    _ controller: UIDocumentInteractionController
+  ) {
+    releaseDocumentInteractionController(controller)
+  }
+
+  private func releaseDocumentInteractionController(
+    _ controller: UIDocumentInteractionController
+  ) {
+    if documentInteractionController === controller {
+      documentInteractionController = nil
+    }
   }
 }
 
@@ -371,35 +582,47 @@ final class IspaceNativeWebViewFactory: NSObject, FlutterPlatformViewFactory {
   }
 }
 
-final class IspaceNativeWebView: NSObject, FlutterPlatformView {
+final class IspaceNativeWebView: NSObject, FlutterPlatformView, WKNavigationDelegate {
   private let webView: WKWebView
   private let container: UIView
+  private let isMailContent: Bool
 
   init(frame: CGRect, viewId: Int64, args: Any?) {
-    self.webView = WKWebView(frame: frame, configuration: WKWebViewConfiguration())
+    let params = args as? [String: Any] ?? [:]
+    let isMailContent = params["isMailContent"] as? Bool == true
+    let configuration = WKWebViewConfiguration()
+    if isMailContent {
+      configuration.websiteDataStore = .nonPersistent()
+      configuration.preferences.javaScriptEnabled = false
+      if #available(iOS 14.0, *) {
+        configuration.defaultWebpagePreferences.allowsContentJavaScript = false
+      }
+    }
+
+    self.isMailContent = isMailContent
+    self.webView = WKWebView(frame: frame, configuration: configuration)
     self.container = UIView(frame: frame)
     super.init()
+    self.webView.navigationDelegate = self
     self.webView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
-    self.webView.allowsBackForwardNavigationGestures = true
+    self.webView.allowsBackForwardNavigationGestures = !isMailContent
     self.webView.scrollView.alwaysBounceVertical = true
     self.container.addSubview(self.webView)
-    self.loadFromArgs(args)
+    self.loadFromParams(params)
   }
 
   func view() -> UIView {
     container
   }
 
-  private func loadFromArgs(_ args: Any?) {
-    guard let params = args as? [String: Any] else {
-      return
-    }
+  private func loadFromParams(_ params: [String: Any]) {
     let initialUrl = (params["initialUrl"] as? String) ?? ""
     let htmlContent = (params["htmlContent"] as? String) ?? ""
     let baseUrlString = (params["baseUrl"] as? String) ?? ""
     let initial = URL(string: initialUrl)
+    let baseUrl = URL(string: baseUrlString)
     let cookieStore = webView.configuration.websiteDataStore.httpCookieStore
-    let rawCookies = (params["cookies"] as? [[String: Any]]) ?? []
+    let rawCookies = isMailContent ? [] : (params["cookies"] as? [[String: Any]]) ?? []
 
     let group = DispatchGroup()
     for raw in rawCookies {
@@ -412,21 +635,46 @@ final class IspaceNativeWebView: NSObject, FlutterPlatformView {
       }
       let domain = (raw["domain"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
       let path = (raw["path"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+      let hostOnly = (raw["hostOnly"] as? Bool) == true
+      let secure = (raw["secure"] as? Bool) == true
+      let expiresAt = (raw["expiresAt"] as? NSNumber)?.doubleValue
       let cleanedDomain = domain?
         .trimmingCharacters(in: CharacterSet(charactersIn: "."))
         .trimmingCharacters(in: .whitespacesAndNewlines)
+      let fallbackUrl = baseUrl ?? initial
+      let fallbackDomain = fallbackUrl?.host ?? ""
 
       var properties: [HTTPCookiePropertyKey: Any] = [
         .name: name,
         .value: value,
         .path: (path?.isEmpty == false ? path! : "/"),
       ]
-      if let cleanedDomain, !cleanedDomain.isEmpty {
+      if hostOnly {
+        guard
+          let cleanedDomain,
+          !cleanedDomain.isEmpty,
+          let fallbackUrl,
+          cleanedDomain.caseInsensitiveCompare(fallbackDomain) == .orderedSame
+        else {
+          continue
+        }
+        properties[.originURL] = fallbackUrl
+      } else if
+        let cleanedDomain,
+        !cleanedDomain.isEmpty,
+        cleanedDomain.caseInsensitiveCompare(fallbackDomain) == .orderedSame
+      {
         properties[.domain] = cleanedDomain
       } else {
-        properties[.domain] = initial?.host ?? "mail.bnbu.edu.cn"
+        continue
       }
-      properties[.secure] = "TRUE"
+      if secure {
+        properties[.secure] = "TRUE"
+      }
+      if let expiresAt {
+        properties[.expires] = Date(timeIntervalSince1970: expiresAt / 1000)
+      }
+      properties[HTTPCookiePropertyKey(rawValue: "HttpOnly")] = "TRUE"
 
       guard let cookie = HTTPCookie(properties: properties) else {
         continue
@@ -440,12 +688,31 @@ final class IspaceNativeWebView: NSObject, FlutterPlatformView {
     group.notify(queue: .main) { [weak self] in
       guard let self else { return }
       if !htmlContent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-        let baseUrl = URL(string: baseUrlString)
         self.webView.loadHTMLString(htmlContent, baseURL: baseUrl)
         return
       }
       guard let initial else { return }
       self.webView.load(URLRequest(url: initial))
     }
+  }
+
+  func webView(
+    _ webView: WKWebView,
+    decidePolicyFor navigationAction: WKNavigationAction,
+    decisionHandler: @escaping (WKNavigationActionPolicy) -> Void
+  ) {
+    guard isMailContent, navigationAction.navigationType == .linkActivated else {
+      decisionHandler(.allow)
+      return
+    }
+    guard let url = navigationAction.request.url else {
+      decisionHandler(.cancel)
+      return
+    }
+    let scheme = url.scheme?.lowercased()
+    if scheme == "http" || scheme == "https" {
+      UIApplication.shared.open(url, options: [:])
+    }
+    decisionHandler(.cancel)
   }
 }

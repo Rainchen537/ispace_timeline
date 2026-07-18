@@ -18,42 +18,56 @@ class RootShellPage extends StatefulWidget {
 
 class _RootShellPageState extends State<RootShellPage> {
   int _index = 2;
+  late final List<Widget?> _pages;
 
   @override
-  Widget build(BuildContext context) {
-    final pages = [
-      const PlaceholderPage(
+  void initState() {
+    super.initState();
+    _pages = List<Widget?>.filled(5, null);
+    _loadPage(_index);
+  }
+
+  void _loadPage(int index) {
+    if (_pages[index] != null) {
+      return;
+    }
+    _pages[index] = switch (index) {
+      0 => const PlaceholderPage(
         title: 'Home',
         subtitle: '校园与课程的统一入口',
         icon: Icons.home_rounded,
         gradient: [Color(0xFF003049), Color(0xFF1D3557)],
       ),
-      MailPage(
+      1 => MailPage(controller: widget.controller),
+      2 => IspacePage(
         controller: widget.controller,
+        onGoToUserTab: () => _selectTab(4),
       ),
-      IspacePage(
-        controller: widget.controller,
-        onGoToUserTab: () {
-          setState(() {
-            _index = 4;
-          });
-        },
-      ),
-      SchedulePage(
-        controller: widget.controller,
-      ),
-      UserPage(controller: widget.controller),
-    ];
+      3 => SchedulePage(controller: widget.controller),
+      4 => UserPage(controller: widget.controller),
+      _ => const SizedBox.shrink(),
+    };
+  }
 
+  void _selectTab(int index) {
+    setState(() {
+      _loadPage(index);
+      _index = index;
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
     return Scaffold(
-      body: IndexedStack(index: _index, children: pages),
+      body: IndexedStack(
+        index: _index,
+        children: _pages
+            .map((page) => page ?? const SizedBox.shrink())
+            .toList(growable: false),
+      ),
       bottomNavigationBar: NavigationBar(
         selectedIndex: _index,
-        onDestinationSelected: (value) {
-          setState(() {
-            _index = value;
-          });
-        },
+        onDestinationSelected: _selectTab,
         destinations: const [
           NavigationDestination(
             icon: Icon(Icons.home_outlined),

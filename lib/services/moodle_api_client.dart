@@ -4,6 +4,7 @@ import 'dart:convert';
 import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 
+import '../config/app_config.dart';
 import '../models/course_content.dart';
 import '../models/course_summary.dart';
 import '../models/recent_course.dart';
@@ -34,10 +35,12 @@ class MoodleApiException implements Exception {
 }
 
 class MoodleApiClient {
-  MoodleApiClient({
-    http.Client? client,
-    this.baseUrl = 'https://ispace.uic.edu.cn',
-  }) : _httpClient = client ?? http.Client() {
+  MoodleApiClient({http.Client? client, String? baseUrl, String? cookieDomain})
+    : _httpClient = client ?? http.Client(),
+      baseUrl = AppConfig.normalizedBaseUrl(baseUrl ?? AppConfig.ispaceBaseUrl),
+      cookieDomain = AppConfig.normalizedCookieDomain(
+        cookieDomain ?? AppConfig.ispaceCookieDomain,
+      ) {
     _webHttpClient.userAgent =
         'Mozilla/5.0 (Macintosh; Intel Mac OS X) AppleWebKit/537.36 '
         '(KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36';
@@ -45,12 +48,41 @@ class MoodleApiClient {
 
   final http.Client _httpClient;
   final String baseUrl;
+  final String cookieDomain;
   final HttpClient _webHttpClient = HttpClient();
-  final Map<String, Cookie> _webCookies = <String, Cookie>{};
+  final List<_StoredWebCookie> _webCookies = <_StoredWebCookie>[];
   String? _webSessionUser;
 
   static const int _timelinePageSize = 50;
   static const int _maxTimelinePages = 50;
+
+  void clearWebSession() {
+    _webCookies.clear();
+    _webSessionUser = null;
+  }
+
+  @visibleForTesting
+  String decoratePluginFileUrlWithTokenForTesting(
+    String url, {
+    required String token,
+  }) {
+    return _decoratePluginFileUrlWithToken(url, token: token);
+  }
+
+  @visibleForTesting
+  void cacheWebCookieForTesting(Cookie cookie, Uri origin) {
+    _cacheWebCookies(<Cookie>[cookie], origin);
+  }
+
+  @visibleForTesting
+  String webCookieHeaderForTesting(Uri target) {
+    return _buildCookieHeader(target);
+  }
+
+  @visibleForTesting
+  List<WebSessionCookie> webSessionCookiesForTesting(Uri target) {
+    return _webSessionCookiesFor(target);
+  }
 
   void dispose() {
     _httpClient.close();
@@ -150,24 +182,28 @@ class MoodleApiClient {
     required String password,
   }) async {
     await _ensureWebSession(username: username, password: password);
-    final host = Uri.parse(baseUrl).host;
-    final cookies = <WebSessionCookie>[];
-    for (final cookie in _webCookies.values) {
-      final domain = (cookie.domain ?? '').trim().replaceFirst(
-        RegExp(r'^\.+'),
-        '',
-      );
-      final path = (cookie.path ?? '').trim();
-      cookies.add(
-        WebSessionCookie(
-          name: cookie.name,
-          value: cookie.value,
-          domain: domain.isEmpty ? host : domain,
-          path: path.isEmpty ? '/' : path,
-        ),
-      );
-    }
-    return WebSessionSnapshot(baseUrl: baseUrl, cookies: cookies);
+    final baseUri = Uri.parse(baseUrl);
+    return WebSessionSnapshot(
+      baseUrl: baseUrl,
+      cookies: _webSessionCookiesFor(baseUri),
+    );
+  }
+
+  List<WebSessionCookie> _webSessionCookiesFor(Uri uri) {
+    final snapshotHost = uri.host.toLowerCase();
+    return _matchingWebCookies(uri)
+        .map(
+          (cookie) => WebSessionCookie(
+            name: cookie.name,
+            value: cookie.value,
+            domain: snapshotHost,
+            path: cookie.path,
+            hostOnly: cookie.hostOnly || cookie.domain != snapshotHost,
+            secure: cookie.secure,
+            expiresAt: cookie.expires,
+          ),
+        )
+        .toList(growable: false);
   }
 
   Future<List<CourseSummary>> fetchMyCourses({
@@ -642,7 +678,7 @@ class MoodleApiClient {
     required String password,
   }) async {
     final sameUser = _webSessionUser != null && _webSessionUser == username;
-    final hasCookies = _webCookies.isNotEmpty;
+    final hasCookies = _matchingWebCookies(Uri.parse(baseUrl)).isNotEmpty;
     if (sameUser && hasCookies) {
       try {
         final checkUri = Uri.parse('$baseUrl/my/');
@@ -736,8 +772,9 @@ class MoodleApiClient {
     final request = await _webHttpClient.openUrl(method, uri);
     request.followRedirects = false;
     request.maxRedirects = 0;
-    if (_webCookies.isNotEmpty) {
-      request.headers.set(HttpHeaders.cookieHeader, _buildCookieHeader());
+    final cookieHeader = _buildCookieHeader(uri);
+    if (cookieHeader.isNotEmpty) {
+      request.headers.set(HttpHeaders.cookieHeader, cookieHeader);
     }
     if (contentType != null) {
       request.headers.contentType = contentType;
@@ -747,7 +784,7 @@ class MoodleApiClient {
     }
 
     final response = await request.close();
-    _cacheWebCookies(response.cookies);
+    _cacheWebCookies(response.cookies, uri);
     final responseBody = await utf8.decoder.bind(response).join();
     return _WebResponse(
       statusCode: response.statusCode,
@@ -756,15 +793,50 @@ class MoodleApiClient {
     );
   }
 
-  String _buildCookieHeader() {
-    return _webCookies.values
-        .map((cookie) => '${cookie.name}=${cookie.value}')
-        .join('; ');
+  List<_StoredWebCookie> _matchingWebCookies(Uri uri) {
+    final baseUri = Uri.parse(baseUrl);
+    if (!_hasSameOrigin(uri, baseUri)) {
+      return const <_StoredWebCookie>[];
+    }
+
+    final now = DateTime.now();
+    _webCookies.removeWhere((cookie) => cookie.isExpired(now));
+    final matches = _webCookies
+        .where((cookie) => cookie.matches(uri, now))
+        .toList(growable: false);
+    matches.sort(
+      (left, right) => right.path.length.compareTo(left.path.length),
+    );
+    return matches;
   }
 
-  void _cacheWebCookies(List<Cookie> cookies) {
+  String _buildCookieHeader(Uri uri) {
+    return _matchingWebCookies(
+      uri,
+    ).map((cookie) => '${cookie.name}=${cookie.value}').join('; ');
+  }
+
+  void _cacheWebCookies(List<Cookie> cookies, Uri origin) {
+    final baseUri = Uri.parse(baseUrl);
+    if (!_hasSameOrigin(origin, baseUri)) {
+      return;
+    }
+
+    final now = DateTime.now();
     for (final cookie in cookies) {
-      _webCookies[cookie.name] = cookie;
+      final stored = _StoredWebCookie.fromCookie(
+        cookie,
+        origin,
+        trustedDomain: cookieDomain,
+        now: now,
+      );
+      if (stored == null) {
+        continue;
+      }
+      _webCookies.removeWhere((existing) => existing.hasSameIdentity(stored));
+      if (!stored.isExpired(now)) {
+        _webCookies.add(stored);
+      }
     }
   }
 
@@ -1347,12 +1419,34 @@ class MoodleApiClient {
     if (!uri.path.contains('/pluginfile.php')) {
       return trimmed;
     }
+    final configuredBaseUri = Uri.parse(baseUrl);
+    if ((uri.isAbsolute || uri.hasAuthority) &&
+        !_hasSameOrigin(uri, configuredBaseUri)) {
+      return trimmed;
+    }
     if (uri.queryParameters['token']?.trim().isNotEmpty ?? false) {
       return trimmed;
     }
     final query = Map<String, String>.from(uri.queryParameters);
     query['token'] = token;
     return uri.replace(queryParameters: query).toString();
+  }
+
+  bool _hasSameOrigin(Uri left, Uri right) {
+    return left.scheme.toLowerCase() == right.scheme.toLowerCase() &&
+        left.host.toLowerCase() == right.host.toLowerCase() &&
+        _effectivePort(left) == _effectivePort(right);
+  }
+
+  int _effectivePort(Uri uri) {
+    if (uri.hasPort) {
+      return uri.port;
+    }
+    return switch (uri.scheme.toLowerCase()) {
+      'http' => 80,
+      'https' => 443,
+      _ => -1,
+    };
   }
 
   Map<String, dynamic> _asJsonMap(dynamic value) {
@@ -1498,6 +1592,115 @@ class MoodleApiClient {
       }
     }
     return fallback;
+  }
+}
+
+class _StoredWebCookie {
+  const _StoredWebCookie({
+    required this.name,
+    required this.value,
+    required this.domain,
+    required this.path,
+    required this.hostOnly,
+    required this.secure,
+    this.expires,
+  });
+
+  final String name;
+  final String value;
+  final String domain;
+  final String path;
+  final bool hostOnly;
+  final bool secure;
+  final DateTime? expires;
+
+  static _StoredWebCookie? fromCookie(
+    Cookie cookie,
+    Uri origin, {
+    required String trustedDomain,
+    required DateTime now,
+  }) {
+    final originHost = origin.host.trim().toLowerCase();
+    final normalizedTrustedDomain = trustedDomain.trim().toLowerCase();
+    if (originHost.isEmpty) {
+      return null;
+    }
+    final rawDomain = (cookie.domain ?? '').trim().toLowerCase();
+    final normalizedDomain = rawDomain.replaceFirst(RegExp(r'^\.+'), '');
+    final hostOnly = normalizedDomain.isEmpty;
+    final domain = hostOnly ? originHost : normalizedDomain;
+    final isWithinTrustedDomain =
+        normalizedTrustedDomain.isNotEmpty &&
+        _domainMatches(originHost, normalizedTrustedDomain) &&
+        _domainMatches(domain, normalizedTrustedDomain);
+    if (domain.isEmpty ||
+        domain.endsWith('.') ||
+        (!hostOnly &&
+            (!_domainMatches(originHost, domain) ||
+                (domain != originHost && !isWithinTrustedDomain)))) {
+      return null;
+    }
+
+    final rawPath = (cookie.path ?? '').trim();
+    final path = rawPath.startsWith('/') ? rawPath : _defaultPath(origin);
+    final maxAge = cookie.maxAge;
+    final expires = maxAge == null
+        ? cookie.expires
+        : now.add(Duration(seconds: maxAge));
+    return _StoredWebCookie(
+      name: cookie.name,
+      value: cookie.value,
+      domain: domain,
+      path: path,
+      hostOnly: hostOnly,
+      secure: cookie.secure,
+      expires: expires,
+    );
+  }
+
+  bool hasSameIdentity(_StoredWebCookie other) {
+    return name == other.name && domain == other.domain && path == other.path;
+  }
+
+  bool matches(Uri uri, DateTime now) {
+    if (isExpired(now) || (secure && uri.scheme.toLowerCase() != 'https')) {
+      return false;
+    }
+    final host = uri.host.toLowerCase();
+    final domainMatches = hostOnly
+        ? host == domain
+        : _domainMatches(host, domain);
+    return domainMatches && _pathMatches(uri.path, path);
+  }
+
+  bool isExpired(DateTime now) {
+    return expires != null && !expires!.isAfter(now);
+  }
+
+  static bool _domainMatches(String host, String domain) {
+    return host == domain || host.endsWith('.$domain');
+  }
+
+  static bool _pathMatches(String requestPath, String cookiePath) {
+    final normalizedRequestPath = requestPath.isEmpty ? '/' : requestPath;
+    if (normalizedRequestPath == cookiePath) {
+      return true;
+    }
+    if (!normalizedRequestPath.startsWith(cookiePath)) {
+      return false;
+    }
+    return cookiePath.endsWith('/') ||
+        normalizedRequestPath.length > cookiePath.length &&
+            normalizedRequestPath[cookiePath.length] == '/';
+  }
+
+  static String _defaultPath(Uri origin) {
+    final requestPath = origin.path;
+    if (!requestPath.startsWith('/') || requestPath == '/') {
+      return '/';
+    }
+    final lastSlash = requestPath.lastIndexOf('/');
+    return lastSlash <= 0 ? '/' : requestPath.substring(0, lastSlash);
   }
 }
 

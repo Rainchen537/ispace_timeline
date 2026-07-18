@@ -4,6 +4,7 @@ import 'package:intl/intl.dart';
 
 import '../models/course_content.dart';
 import '../models/course_summary.dart';
+import '../services/native_actions.dart';
 import '../state/app_session_controller.dart';
 import 'web_mirror_page.dart';
 
@@ -455,14 +456,19 @@ class _FolderDetailPageState extends State<FolderDetailPage> {
     }
     final fileName = '${_safeFileName(widget.module.name)}.zip';
     String cookieHeader = '';
+    String cookieOrigin = '';
     try {
       final snapshot = await widget.controller.prepareWebSession();
-      cookieHeader = snapshot.cookies
-          .where((cookie) => cookie.name.trim().isNotEmpty)
-          .map((cookie) => '${cookie.name}=${cookie.value}')
-          .join('; ');
+      if (urlsHaveSameOrigin(_downloadFolderUrl, snapshot.baseUrl)) {
+        cookieHeader = snapshot.cookies
+            .where((cookie) => cookie.name.trim().isNotEmpty)
+            .map((cookie) => '${cookie.name}=${cookie.value}')
+            .join('; ');
+        cookieOrigin = snapshot.baseUrl;
+      }
     } catch (_) {
       cookieHeader = '';
+      cookieOrigin = '';
     }
     try {
       await _nativeActionsChannel.invokeMethod('downloadFile', {
@@ -470,6 +476,7 @@ class _FolderDetailPageState extends State<FolderDetailPage> {
         'filename': fileName,
         'title': widget.module.name,
         if (cookieHeader.isNotEmpty) 'cookieHeader': cookieHeader,
+        if (cookieOrigin.isNotEmpty) 'cookieOrigin': cookieOrigin,
       });
       if (!mounted) {
         return;

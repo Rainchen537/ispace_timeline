@@ -39,7 +39,18 @@ app.*.symbols
 # Obfuscation related
 app.*.map.json
 
+# Local runtime configuration
+/config/dart_defines.local.json
+
+# Signing credentials
+/android/key.properties
+/android/*.jks
+/android/*.keystore
+*.p12
+*.mobileprovision
+
 # Android Studio will place build artifacts here
+/android/build/
 /android/app/debug
 /android/app/profile
 /android/app/release
