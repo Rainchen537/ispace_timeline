@@ -8,6 +8,7 @@
 
 - Moodle Web Cookie 改为按来源、Domain、host-only、Path、Secure、Expires/Max-Age 约束保存和发送，并且 Web session snapshot 只导出与 iSpace Base URL 同源的 Cookie；
 - Web session snapshot 和 Android/iOS 原生 Cookie 注入保留 host-only、Secure 和过期时间语义；父域 Cookie 导出到原生 WebView 时会收窄到 iSpace 来源 host，避免扩大可见范围；
+- Android 原生 WebView 对 Platform Channel 的 Cookie 列表使用运行时类型过滤，跳过格式错误的元素，避免未检查泛型转换导致原生崩溃；
 - Moodle 与 MIS 手动 Cookie jar 只接受来源 host 或显式配置的最小可信 Cookie 域边界内的 Domain，拒绝更宽的公共后缀范围，并且只向配置的可信来源发送 Cookie；
 - Moodle Cookie 按名称、Domain 和 Path 替换，避免 host-only 与显式 Domain 版本并存并产生重复旧会话值；
 - Moodle `/pluginfile.php` URL 仅在与配置的 iSpace Base URL 同源时附加 token，拒绝向外部 host、不同 scheme 或不同有效端口泄露 token；

@@ -479,7 +479,6 @@ private class IspaceNativeWebView(
             cookieManager.setAcceptThirdPartyCookies(webView, !isMailContent)
         }
 
-        @Suppress("UNCHECKED_CAST")
         val initialUrl = (params["initialUrl"] as? String).orEmpty()
         val htmlContent = (params["htmlContent"] as? String).orEmpty()
         val baseUrl = (params["baseUrl"] as? String).orEmpty()
@@ -488,7 +487,9 @@ private class IspaceNativeWebView(
         val cookies = if (isMailContent) {
             emptyList()
         } else {
-            params["cookies"] as? List<Map<String, Any?>> ?: emptyList()
+            (params["cookies"] as? List<*>)
+                ?.filterIsInstance<Map<*, *>>()
+                ?: emptyList()
         }
         var didSetCookie = false
         for (cookie in cookies) {
