@@ -1964,7 +1964,8 @@ class _MailDetailPageState extends State<_MailDetailPage> {
         mimeType: mimeType.isEmpty ? '*/*' : mimeType,
       );
     } catch (error) {
-      if (_isCurrentRoute) {
+      if (!mounted) return;
+      if (ModalRoute.of(context)?.isCurrent ?? false) {
         ScaffoldMessenger.of(
           context,
         ).showSnackBar(SnackBar(content: Text('下载失败：$error')));
