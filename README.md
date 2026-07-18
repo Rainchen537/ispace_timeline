@@ -91,7 +91,7 @@ flutter run --dart-define-from-file=config/dart_defines.local.json
 - Android/iOS 原生下载使用受控重定向和同源 Cookie 规则，保留同源响应中的 Cookie 更新；文件名可由 `Content-Disposition`/系统响应元数据确定，保存前会清理不可信字符，并拒绝把登录页 HTML 当作目标文件；
 - Android 10 及以上通过 MediaStore 原子发布到公共 Downloads；Android 6 至 9 请求旧版存储权限后写入公共 Downloads，并使用唯一临时文件完成发布；
 - 分享文件使用随机缓存目录。iOS 在分享完成、取消或失败后清理，Android 清理失败任务并在后续分享时删除超过 24 小时的旧缓存；
-- HTML 邮件默认阻止脚本、表单和远程资源，用户点击的 HTTP(S) 链接交给系统浏览器打开；所有 `MailClient` 操作串行执行，消息和附件按账号、邮箱、UIDVALIDITY、Message-ID、UID 和 MIME part 隔离，读取、分页、草稿替换、删除与恢复会校验邮箱身份；
+- HTML 邮件默认阻止脚本、表单和远程资源，用户点击的 HTTP(S) 链接交给系统浏览器打开；所有 `MailClient` 操作串行执行，消息和附件按账号、邮箱、UIDVALIDITY、Message-ID、UID 和 MIME part 隔离，读取、分页、草稿替换、删除与恢复会校验邮箱身份；打开邮件时只获取正文和附件结构，附件在用户点击后按 MIME part 拉取，安全缓存命中时不重复联网；
 - 项目不集成广告或第三方用户追踪 SDK。
 
 公开隐私政策由独立仓库维护：

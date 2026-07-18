@@ -110,7 +110,7 @@ flutter run --dart-define-from-file=config/dart_defines.local.json
 - 旧 combined/split secure record 和原生明文记录采用 secure-first、cleanup-convergent 迁移；清理失败必须可观察并在后续 load 重试，损坏 combined record 禁止降级到旧凭据；
 - `AppSessionController` 的 credential mutation、auth generation、共享 logout Future 和 reminder mutation 串行化不得绕过；logout 期间禁止启动新 login，异步结果必须在发布前检查 generation；
 - 文件名、URL、HTML、重定向目标和平台通道参数均视为不可信输入；附件/下载必须使用唯一临时文件和原子发布，邮件缓存身份至少包含账号、mailbox、UIDVALIDITY、Message-ID、UID 和 MIME part；
-- 所有 `MailClient` 操作必须经过同一串行队列；读取、附件、分页、草稿替换、删除和恢复不得只凭 UID 操作，必须携带并校验 mailbox 与 UIDVALIDITY。新草稿的 APPENDUID 结果必须同时保留 UID 和 UIDVALIDITY；
+- 所有 `MailClient` 操作必须经过同一串行队列；读取、附件、分页、草稿替换、删除和恢复不得只凭 UID 操作，必须携带并校验 mailbox 与 UIDVALIDITY。邮件详情不得预取完整附件，附件必须按 MIME part 获取并优先复用按完整身份隔离的本地缓存；新草稿的 APPENDUID 结果必须同时保留 UID 和 UIDVALIDITY；
 - token 只能发送到其配置来源的同源地址；Cookie 只能发送到明确配置的平台来源，跨来源重定向必须移除 Cookie，HTTPS 下载不得降级到 HTTP；同源重定向中的 Cookie 更新可继续用于后续同源请求；
 - Android/iOS 原生下载必须拒绝意外登录 HTML、优先采用响应文件名并清理文件名。Android API 23–28 写公共 Downloads 前请求旧版存储权限，API 29+ 使用 MediaStore；分享缓存必须使用随机目录并执行失败清理和过期清理；
 - HTML 邮件默认禁用 JavaScript、持久化 Web 存储、第三方 Cookie 和远程内容；

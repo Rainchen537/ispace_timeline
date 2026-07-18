@@ -256,10 +256,13 @@ class _IoMailService implements MailService {
           mailboxUidValidity: uidValidity,
           uid: uid,
         );
-        final loadedMessage = await client.fetchMessageContents(
-          message,
-          markAsSeen: true,
-          includedInlineTypes: const [MediaToptype.text, MediaToptype.image],
+        final loadedMessage = await _loadMessageDetailContents(
+          client: client,
+          mailbox: mailbox,
+          folder: folder,
+          mailboxUidValidity: uidValidity,
+          uid: uid,
+          message: message,
         );
         loadedMessage.isSeen = true;
         _messageCache[(folder, uidValidity, uid)] = loadedMessage;
@@ -284,8 +287,7 @@ class _IoMailService implements MailService {
   }) {
     return _serialize(() async {
       try {
-        final index = int.tryParse(partId);
-        if (index == null || index < 0) {
+        if (partId.trim().isEmpty) {
           throw const MailServiceException('附件参数错误。');
         }
 
@@ -302,21 +304,63 @@ class _IoMailService implements MailService {
         );
         _discardStaleMailboxCache(folder, uidValidity);
 
-        final message = await _loadMessageEnvelope(
+        var message = await _loadMessageEnvelope(
           client: client,
           mailbox: mailbox,
           folder: folder,
           mailboxUidValidity: uidValidity,
           uid: uid,
         );
-        final loadedMessage = await client.fetchMessageContents(message);
-        _messageCache[(folder, uidValidity, uid)] = loadedMessage;
+        message = await _loadMessageStructure(
+          client: client,
+          mailbox: mailbox,
+          folder: folder,
+          mailboxUidValidity: uidValidity,
+          uid: uid,
+          message: message,
+        );
 
-        final allParts = loadedMessage.allPartsFlat;
+        final attachmentInfos = _attachmentContentInfos(message);
+        if (attachmentInfos.isNotEmpty) {
+          ContentInfo? attachmentInfo;
+          for (final info in attachmentInfos) {
+            if (info.fetchId == partId) {
+              attachmentInfo = info;
+              break;
+            }
+          }
+          if (attachmentInfo == null) {
+            throw const MailServiceException('未找到该附件。');
+          }
+          final loadedPart =
+              message.getPart(attachmentInfo.fetchId) ??
+              await client.fetchMessagePart(message, attachmentInfo.fetchId);
+          final body = message.body;
+          if (body != null &&
+              body.fetchId == null &&
+              (body.parts == null || body.parts!.isEmpty) &&
+              attachmentInfo.fetchId == '1') {
+            _applyBodyPartHeaders(loadedPart, body);
+          }
+          _messageCache[(folder, uidValidity, uid)] = message;
+          return loadedPart.decodeContentBinary() ?? const [];
+        }
+
+        final index = int.tryParse(partId);
+        if (index == null || index < 0) {
+          throw const MailServiceException('附件参数错误。');
+        }
+        final allParts = message.allPartsFlat;
         if (index >= allParts.length) {
           throw const MailServiceException('未找到该附件。');
         }
-        return allParts[index].decodeContentBinary() ?? const [];
+        final part = allParts[index];
+        final contentDisposition =
+            part.decodeHeaderValue('Content-Disposition')?.toLowerCase() ?? '';
+        if (!contentDisposition.contains('attachment')) {
+          throw const MailServiceException('未找到该附件。');
+        }
+        return part.decodeContentBinary() ?? const [];
       } catch (error) {
         throw _mapError(error);
       }
@@ -707,6 +751,107 @@ class _IoMailService implements MailService {
     throw const MailServiceException('未找到这封邮件，请先刷新后重试。');
   }
 
+  Future<MimeMessage> _loadMessageStructure({
+    required MailClient client,
+    required Mailbox mailbox,
+    required MailFolder folder,
+    required int? mailboxUidValidity,
+    required int uid,
+    required MimeMessage message,
+  }) async {
+    if (message.body != null) return message;
+
+    final messages = await client.fetchMessageSequence(
+      MessageSequence.fromIds([uid], isUid: true),
+      mailbox: mailbox,
+      fetchPreference: FetchPreference.bodystructure,
+    );
+    for (final structuredMessage in messages) {
+      if (structuredMessage.uid != uid) continue;
+      message
+        ..body = structuredMessage.body
+        ..flags = structuredMessage.flags ?? message.flags
+        ..size = structuredMessage.size ?? message.size;
+      if (message.body == null) {
+        throw const MailServiceException('无法读取邮件结构，请稍后重试。');
+      }
+      _messageCache[(folder, mailboxUidValidity, uid)] = message;
+      return message;
+    }
+    throw const MailServiceException('未找到这封邮件，请先刷新后重试。');
+  }
+
+  Future<MimeMessage> _loadMessageDetailContents({
+    required MailClient client,
+    required Mailbox mailbox,
+    required MailFolder folder,
+    required int? mailboxUidValidity,
+    required int uid,
+    required MimeMessage message,
+  }) async {
+    final loadedMessage = await _loadMessageStructure(
+      client: client,
+      mailbox: mailbox,
+      folder: folder,
+      mailboxUidValidity: mailboxUidValidity,
+      uid: uid,
+      message: message,
+    );
+    final body = loadedMessage.body!;
+    final parts = body.parts;
+    if (parts == null || parts.isEmpty) {
+      if (body.contentDisposition?.disposition !=
+          ContentDisposition.attachment) {
+        final part = await client.fetchMessagePart(loadedMessage, '1');
+        _applyBodyPartHeaders(part, body);
+      }
+    } else {
+      final bodyContents = <ContentInfo>[];
+      body.collectContentInfo(
+        ContentDisposition.attachment,
+        bodyContents,
+        reverse: true,
+      );
+      bodyContents.removeWhere((info) {
+        final mediaType = info.mediaType?.top;
+        return mediaType != MediaToptype.text &&
+            mediaType != MediaToptype.image;
+      });
+      for (final info in bodyContents) {
+        if (info.fetchId.trim().isEmpty) continue;
+        await client.fetchMessagePart(loadedMessage, info.fetchId);
+      }
+    }
+
+    await client.markSeen(MessageSequence.fromIds([uid], isUid: true));
+    loadedMessage.isSeen = true;
+    _messageCache[(folder, mailboxUidValidity, uid)] = loadedMessage;
+    return loadedMessage;
+  }
+
+  void _applyBodyPartHeaders(MimePart part, BodyPart body) {
+    final contentType = body.contentType;
+    if (contentType != null &&
+        part.decodeHeaderValue(MailConventions.headerContentType) == null) {
+      part.addHeader(MailConventions.headerContentType, contentType.render());
+    }
+    final contentDisposition = body.contentDisposition;
+    if (contentDisposition != null &&
+        part.decodeHeaderValue(MailConventions.headerContentDisposition) ==
+            null) {
+      part.addHeader(
+        MailConventions.headerContentDisposition,
+        contentDisposition.render(),
+      );
+    }
+    final encoding = body.encoding;
+    if (encoding != null &&
+        part.decodeHeaderValue(MailConventions.headerContentTransferEncoding) ==
+            null) {
+      part.addHeader(MailConventions.headerContentTransferEncoding, encoding);
+    }
+  }
+
   @override
   Future<void> close() => _serialize(_closeConnection);
 
@@ -823,6 +968,30 @@ class _IoMailService implements MailService {
     );
   }
 
+  List<ContentInfo> _attachmentContentInfos(MimeMessage message) {
+    final body = message.body;
+    if (body == null) return const [];
+    final result = <ContentInfo>[];
+    body.collectContentInfo(ContentDisposition.attachment, result);
+    if (result.isEmpty &&
+        (body.parts == null || body.parts!.isEmpty) &&
+        body.contentDisposition?.disposition == ContentDisposition.attachment) {
+      final contentDisposition = body.contentDisposition;
+      if (contentDisposition != null && contentDisposition.size == null) {
+        contentDisposition.size = body.size;
+      }
+      result.add(
+        ContentInfo('1')
+          ..contentDisposition = contentDisposition
+          ..contentType = body.contentType
+          ..cid = body.cid,
+      );
+    }
+    return result
+        .where((info) => info.fetchId.trim().isNotEmpty)
+        .toList(growable: false);
+  }
+
   MailMessageDetail _toDetail(
     MimeMessage message, {
     required MailFolder folder,
@@ -834,23 +1003,38 @@ class _IoMailService implements MailService {
     final htmlBody = _buildRenderableHtml(message);
 
     final attachments = <MailAttachment>[];
-    final allParts = message.allPartsFlat;
-    for (var i = 0; i < allParts.length; i++) {
-      final part = allParts[i];
-      final contentDisposition =
-          part.decodeHeaderValue('Content-Disposition')?.toLowerCase() ?? '';
-      if (contentDisposition.contains('attachment')) {
+    final attachmentInfos = _attachmentContentInfos(message);
+    if (attachmentInfos.isNotEmpty) {
+      for (final info in attachmentInfos) {
         attachments.add(
           MailAttachment(
-            name: part.decodeFileName() ?? '未命名附件',
-            size: 0,
-            mimeType:
-                part.decodeHeaderValue('Content-Type') ??
-                'application/octet-stream',
-            contentId: part.decodeHeaderValue('Content-ID'),
-            partId: i.toString(),
+            name: info.fileName ?? '未命名附件',
+            size: info.size ?? 0,
+            mimeType: info.mediaType?.toString() ?? 'application/octet-stream',
+            contentId: info.cid,
+            partId: info.fetchId,
           ),
         );
+      }
+    } else {
+      final allParts = message.allPartsFlat;
+      for (var i = 0; i < allParts.length; i++) {
+        final part = allParts[i];
+        final contentDisposition =
+            part.decodeHeaderValue('Content-Disposition')?.toLowerCase() ?? '';
+        if (contentDisposition.contains('attachment')) {
+          attachments.add(
+            MailAttachment(
+              name: part.decodeFileName() ?? '未命名附件',
+              size: 0,
+              mimeType:
+                  part.decodeHeaderValue('Content-Type') ??
+                  'application/octet-stream',
+              contentId: part.decodeHeaderValue('Content-ID'),
+              partId: i.toString(),
+            ),
+          );
+        }
       }
     }
 

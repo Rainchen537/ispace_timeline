@@ -276,6 +276,7 @@ class _LoginPageState extends State<LoginPage> {
               ),
             ),
             TextSpan(text: '登录凭据仅保存在设备系统安全存储中，用于恢复登录；退出登录会清除凭据。\n'),
+            TextSpan(text: '邮件附件仅在打开邮箱并主动点击时按需下载，已有安全缓存会优先在本地打开。\n'),
             TextSpan(text: '本应用为非官方客户端。使用问题可反馈至 '),
             TextSpan(
               text: 'v530026091@mail.bnbu.edu.cn',

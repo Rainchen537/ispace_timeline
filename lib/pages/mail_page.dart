@@ -1911,18 +1911,14 @@ class _MailDetailPageState extends State<_MailDetailPage> {
   final Set<String> _downloadingPartIds = {};
   static const _nativeActions = NativeActions();
 
+  bool get _isCurrentRoute =>
+      mounted && (ModalRoute.of(context)?.isCurrent ?? false);
+
   Future<void> _downloadAndOpen(MailAttachment attachment) async {
     final partId = attachment.partId;
     if (partId == null) return;
     setState(() => _downloadingPartIds.add(partId));
     try {
-      final bytes = await widget.mailService.downloadAttachment(
-        credentials: widget.credentials,
-        folder: widget.detail.folder,
-        uid: widget.detail.uid,
-        partId: partId,
-        expectedMailboxUidValidity: widget.detail.mailboxUidValidity,
-      );
       final cacheDirPath = await _nativeActions
           .getMailAttachmentCacheDirectory();
       final fileName = mailAttachmentCacheFileName(
@@ -1935,26 +1931,40 @@ class _MailDetailPageState extends State<_MailDetailPage> {
         originalName: attachment.name,
       );
       final file = File('$cacheDirPath/$fileName');
-      final temporaryFile = File(
-        '$cacheDirPath/.${DateTime.now().microsecondsSinceEpoch}.'
-        '${Random.secure().nextInt(1 << 32)}.partial',
-      );
-      try {
-        await temporaryFile.writeAsBytes(bytes, flush: true);
-        await temporaryFile.rename(file.path);
-      } finally {
-        if (await temporaryFile.exists()) {
-          await temporaryFile.delete();
+      if (!await file.exists()) {
+        if (!_isCurrentRoute) return;
+        final bytes = await widget.mailService.downloadAttachment(
+          credentials: widget.credentials,
+          folder: widget.detail.folder,
+          uid: widget.detail.uid,
+          partId: partId,
+          expectedMailboxUidValidity: widget.detail.mailboxUidValidity,
+        );
+        final temporaryFile = File(
+          '$cacheDirPath/.${DateTime.now().microsecondsSinceEpoch}.'
+          '${Random.secure().nextInt(1 << 32)}.partial',
+        );
+        try {
+          await temporaryFile.writeAsBytes(bytes, flush: true);
+          try {
+            await temporaryFile.rename(file.path);
+          } on FileSystemException {
+            if (!await file.exists()) rethrow;
+          }
+        } finally {
+          if (await temporaryFile.exists()) {
+            await temporaryFile.delete();
+          }
         }
       }
-      if (!mounted) return;
+      if (!_isCurrentRoute) return;
       final mimeType = attachment.mimeType.split(';').first.trim();
       await _nativeActions.openFile(
         path: file.path,
         mimeType: mimeType.isEmpty ? '*/*' : mimeType,
       );
     } catch (error) {
-      if (mounted) {
+      if (_isCurrentRoute) {
         ScaffoldMessenger.of(
           context,
         ).showSnackBar(SnackBar(content: Text('下载失败：$error')));

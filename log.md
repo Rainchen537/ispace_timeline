@@ -23,7 +23,7 @@
 - Android 原生下载统一使用受控 `HttpURLConnection` 重定向：API 29+ 通过 MediaStore 原子发布到公共 Downloads，API 23–28 在取得旧版存储权限后通过唯一 `.partial` 文件发布到公共 Downloads；
 - Android/iOS 原生下载仅在 Cookie origin 同源时发送 Cookie，跨来源重定向移除 Cookie，并拒绝 HTTPS 降级；同源 `Set-Cookie` 更新可用于后续同源跳转，文件名优先来自响应元数据并按 UTF-8 字节限制过滤路径与控制字符，意外登录 HTML 不会保存为目标文件；
 - Android/iOS 分享文件使用独立 UUID 缓存目录；iOS 在分享完成、取消或失败后清理，Android 清理失败任务并在后续分享时删除超过 24 小时的旧缓存；
-- 所有 `MailClient` 操作经同一队列串行执行；邮件附件缓存身份包含账号、mailbox、UIDVALIDITY、Message-ID、UID 和 MIME part，读取、附件、分页、删除、恢复和草稿替换校验 mailbox epoch，新草稿同时保存 APPENDUID 返回的 UID 与 UIDVALIDITY；附件写入使用唯一 `.partial` 文件后原子 rename；
+- 所有 `MailClient` 操作经同一队列串行执行；邮件附件缓存身份包含账号、mailbox、UIDVALIDITY、Message-ID、UID 和 MIME part，读取、附件、分页、删除、恢复和草稿替换校验 mailbox epoch，新草稿同时保存 APPENDUID 返回的 UID 与 UIDVALIDITY；详情只拉取正文和附件结构，附件点击后按 MIME part 获取，命中本地缓存时不重复联网，写入使用唯一 `.partial` 文件后原子 rename；
 - TA 课程及截止时间可见性偏好改为按规范化用户名隔离，旧版设备全局键会删除且不会迁移到当前账号。
 
 ### 工程和发布
@@ -38,9 +38,9 @@
 ### 本地验证
 
 - `dart format lib test`：成功，46 个 Dart 文件均符合格式；
-- 邮箱串行化、UIDVALIDITY 与配置校验增量完成后，`flutter analyze` 为 `No issues found!`，完整 `flutter test` 为 `+81: All tests passed!`；随后增加的严格草稿 APPENDUID 身份传递已由最终 Android/iOS 编译覆盖，最终测试结果以本次推送后的 GitHub Actions 为准；
-- Android：最终工作树执行 `flutter build apk --debug` 成功，Gradle `assembleDebug` 耗时 7.8s；生成 APK 仅为本地构建产物，未纳入 Git；
-- iOS：最终工作树执行 `flutter build ios --debug --no-codesign` 成功，Xcode 构建耗时 10.5s；`flutter build ios --simulator --debug` 也成功，最终耗时 13.8s；
+- 邮箱串行化、UIDVALIDITY 与配置校验增量完成后，`flutter analyze` 为 `No issues found!`，完整 `flutter test` 为 `+81: All tests passed!`；随后增加的严格草稿 APPENDUID 身份传递、附件 MIME part 延迟获取、磁盘缓存命中和非当前路由防误打开均已由最终 Android/iOS 编译覆盖，并增加对应 Widget 回归测试，最终测试结果以本次推送后的 GitHub Actions 为准；
+- Android：最终工作树执行 `flutter build apk --debug` 成功，Gradle `assembleDebug` 耗时 8.2s；生成 APK 仅为本地构建产物，未纳入 Git；
+- iOS：最终工作树执行 `flutter build ios --debug --no-codesign` 成功，Xcode 构建耗时 10.5s；后续附件增量执行 `flutter build ios --simulator --debug` 也成功，最终耗时 10.8s；
 - Android release 门禁：执行 release 构建时在缺少 `android/key.properties` 的环境按预期以 `Release signing is not configured` 和退出码 1 拒绝构建；
 - iPhone 16e（iOS 26.2）模拟器成功安装并启动最终构建，登录页、安全存储/退出清除凭据说明和非官方客户端说明正常显示；截图证据仅保存在仓库外且未纳入 Git；
 - 未使用真实学校账号执行 Mail IMAP、真实 HTML 邮件、附件打开、认证下载、logout 清理及 MIS/Portal SSO 的端到端验证；自动化测试禁止使用真实账号；

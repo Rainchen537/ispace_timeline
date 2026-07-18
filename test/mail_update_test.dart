@@ -9,6 +9,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:ispace_timeline/models/mail_models.dart';
 import 'package:ispace_timeline/pages/mail_page.dart';
 import 'package:ispace_timeline/services/mail_service.dart';
+import 'package:ispace_timeline/services/native_actions.dart';
 
 // ─── Mock MailService ──────────────────────────────────────────────────────────
 
@@ -268,6 +269,30 @@ class _DelayedReadMailService extends _MockMailService {
 
   void completeRead(MailMessageDetail detail) {
     _readCompleter.complete(detail);
+  }
+}
+
+class _DelayedAttachmentMailService extends _MockMailService {
+  _DelayedAttachmentMailService({super.inbox});
+
+  final Completer<List<int>> _downloadCompleter = Completer<List<int>>();
+
+  @override
+  Future<List<int>> downloadAttachment({
+    required MailAccessCredentials credentials,
+    required MailFolder folder,
+    required int uid,
+    required String partId,
+    int? expectedMailboxUidValidity,
+  }) {
+    lastDownloadFolder = folder;
+    lastDownloadExpectedUidValidity = expectedMailboxUidValidity;
+    downloadedPartIds.add(partId);
+    return _downloadCompleter.future;
+  }
+
+  void completeDownload(List<int> bytes) {
+    _downloadCompleter.complete(bytes);
   }
 }
 
@@ -1381,6 +1406,167 @@ void main() {
             const MethodChannel('ispace/native_actions'),
             null,
           );
+    });
+
+    testWidgets('cached attachment opens without another mail download', (
+      tester,
+    ) async {
+      final cacheDirectory = await Directory.systemTemp.createTemp(
+        'ispace-mail-cache-',
+      );
+      addTearDown(() => cacheDirectory.delete(recursive: true));
+      final msg = _makeSummary(uid: 3, subject: 'Cached Attachment');
+      final svc = _MockMailService(inbox: [msg]);
+      const detail = MailMessageDetail(
+        uid: 3,
+        subject: 'Cached Attachment',
+        sender: 'sender@example.com',
+        recipients: 'testuser@mail.bnbu.edu.cn',
+        cc: null,
+        date: null,
+        body: 'Body text',
+        htmlBody: null,
+        isSeen: true,
+        messageId: '<cached@example.com>',
+        mailboxUidValidity: 100,
+        attachments: [
+          MailAttachment(
+            name: 'cached.pdf',
+            size: 3,
+            mimeType: 'application/pdf',
+            partId: '2.1',
+          ),
+        ],
+      );
+      svc.readMessageOverride = (_) => detail;
+      final cacheFileName = mailAttachmentCacheFileName(
+        accountId: _creds().emailAddress,
+        mailbox: MailFolder.inbox.name,
+        messageId: detail.messageId,
+        mailboxUidValidity: detail.mailboxUidValidity,
+        messageUid: detail.uid,
+        partId: '2.1',
+        originalName: 'cached.pdf',
+      );
+      final cacheFile = File('${cacheDirectory.path}/$cacheFileName');
+      await cacheFile.writeAsBytes([1, 2, 3]);
+      final openedPaths = <String>[];
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(
+            const MethodChannel('ispace/native_actions'),
+            (call) async {
+              if (call.method == 'getMailAttachmentCacheDir') {
+                return cacheDirectory.path;
+              }
+              if (call.method == 'openFile') {
+                openedPaths.add((call.arguments as Map)['path'] as String);
+              }
+              return null;
+            },
+          );
+      addTearDown(
+        () => TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+            .setMockMethodCallHandler(
+              const MethodChannel('ispace/native_actions'),
+              null,
+            ),
+      );
+
+      await tester.pumpWidget(
+        _wrapInApp(
+          MailPage.withService(
+            controller: null,
+            mailService: svc,
+            testCredentials: _creds(),
+          ),
+        ),
+      );
+      await tester.pump();
+      await tester.tap(find.text('Cached Attachment'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('cached.pdf'));
+      await tester.pump();
+      await tester.pump();
+
+      expect(svc.downloadedPartIds, isEmpty);
+      expect(openedPaths, [cacheFile.path]);
+    });
+
+    testWidgets('attachment completion does not open over compose page', (
+      tester,
+    ) async {
+      final cacheDirectory = await Directory.systemTemp.createTemp(
+        'ispace-mail-route-',
+      );
+      addTearDown(() => cacheDirectory.delete(recursive: true));
+      final msg = _makeSummary(uid: 4, subject: 'Delayed Attachment');
+      final svc = _DelayedAttachmentMailService(inbox: [msg]);
+      svc.readMessageOverride = (_) => const MailMessageDetail(
+        uid: 4,
+        subject: 'Delayed Attachment',
+        sender: 'sender@example.com',
+        recipients: 'testuser@mail.bnbu.edu.cn',
+        cc: null,
+        date: null,
+        body: 'Body text',
+        htmlBody: null,
+        isSeen: true,
+        mailboxUidValidity: 100,
+        attachments: [
+          MailAttachment(
+            name: 'delayed.pdf',
+            size: 3,
+            mimeType: 'application/pdf',
+            partId: '2.1',
+          ),
+        ],
+      );
+      final openedPaths = <String>[];
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(
+            const MethodChannel('ispace/native_actions'),
+            (call) async {
+              if (call.method == 'getMailAttachmentCacheDir') {
+                return cacheDirectory.path;
+              }
+              if (call.method == 'openFile') {
+                openedPaths.add((call.arguments as Map)['path'] as String);
+              }
+              return null;
+            },
+          );
+      addTearDown(
+        () => TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+            .setMockMethodCallHandler(
+              const MethodChannel('ispace/native_actions'),
+              null,
+            ),
+      );
+
+      await tester.pumpWidget(
+        _wrapInApp(
+          MailPage.withService(
+            controller: null,
+            mailService: svc,
+            testCredentials: _creds(),
+          ),
+        ),
+      );
+      await tester.pump();
+      await tester.tap(find.text('Delayed Attachment'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('delayed.pdf'));
+      await tester.pump();
+      expect(svc.downloadedPartIds, ['2.1']);
+
+      await tester.tap(find.byTooltip('回复'));
+      await tester.pumpAndSettle();
+      svc.completeDownload([1, 2, 3]);
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 100));
+
+      expect(find.text('回复'), findsOneWidget);
+      expect(openedPaths, isEmpty);
     });
   });
 }
