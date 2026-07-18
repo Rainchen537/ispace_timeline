@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:io';
+import 'dart:math';
 
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
@@ -62,6 +63,8 @@ class _MailPageState extends State<MailPage> {
   bool _isMultiSelectMode = false;
   final Set<int> _selectedUids = {};
   bool _isDeleting = false;
+  int _folderRequestGeneration = 0;
+  int _searchRequestGeneration = 0;
 
   bool get _showScopeArea =>
       _searchQuery.isNotEmpty ||
@@ -103,14 +106,21 @@ class _MailPageState extends State<MailPage> {
   }
 
   Future<void> _refreshFolder() async {
-    if (_isLoading) return;
+    final folder = _currentFolder;
+    final requestGeneration = ++_folderRequestGeneration;
+    _searchRequestGeneration++;
     _searchDebounce?.cancel();
     _senderController.clear();
     _recipientController.clear();
     setState(() {
       _isLoading = true;
+      _isLoadingMore = false;
       _errorMessage = null;
+      if (_snapshot?.folder != folder) {
+        _snapshot = null;
+      }
       _searchResults = null;
+      _isSearching = false;
       _searchScope = MailSearchScope.allText;
       _isMultiSelectMode = false;
       _selectedUids.clear();
@@ -123,20 +133,28 @@ class _MailPageState extends State<MailPage> {
       }
       final snapshot = await _mailService.fetchFolder(
         credentials: credentials,
-        folder: _currentFolder,
+        folder: folder,
         page: 1,
       );
-      if (!mounted) return;
+      if (!mounted ||
+          requestGeneration != _folderRequestGeneration ||
+          folder != _currentFolder) {
+        return;
+      }
       setState(() {
         _snapshot = snapshot;
       });
     } catch (error) {
-      if (!mounted) return;
+      if (!mounted ||
+          requestGeneration != _folderRequestGeneration ||
+          folder != _currentFolder) {
+        return;
+      }
       setState(() {
         _errorMessage = error.toString();
       });
     } finally {
-      if (mounted) {
+      if (mounted && requestGeneration == _folderRequestGeneration) {
         setState(() {
           _isLoading = false;
         });
@@ -147,10 +165,13 @@ class _MailPageState extends State<MailPage> {
   Future<void> _loadMore() async {
     final snapshot = _snapshot;
     if (snapshot == null || _isLoadingMore || _isLoading) return;
-    if (snapshot.currentPage * snapshot.pageSize >= snapshot.totalMessages) {
+    if (snapshot.folder != _currentFolder ||
+        snapshot.currentPage * snapshot.pageSize >= snapshot.totalMessages) {
       return;
     }
 
+    final folder = snapshot.folder;
+    final requestGeneration = _folderRequestGeneration;
     setState(() => _isLoadingMore = true);
 
     try {
@@ -159,27 +180,44 @@ class _MailPageState extends State<MailPage> {
       final nextPage = snapshot.currentPage + 1;
       final nextSnapshot = await _mailService.fetchFolder(
         credentials: credentials,
-        folder: _currentFolder,
+        folder: folder,
         page: nextPage,
+        expectedMailboxUidValidity: snapshot.mailboxUidValidity,
       );
-      if (!mounted) return;
+      if (!mounted ||
+          requestGeneration != _folderRequestGeneration ||
+          folder != _currentFolder) {
+        return;
+      }
+      if (nextSnapshot.folder != folder ||
+          nextSnapshot.mailboxUidValidity != snapshot.mailboxUidValidity) {
+        throw const MailServiceException('邮箱内容已更新，请刷新后重试。');
+      }
       setState(() {
         _snapshot = snapshot.copyWith(
           messages: [...snapshot.messages, ...nextSnapshot.messages],
           currentPage: nextPage,
         );
       });
-    } catch (_) {
-      // silently ignore load-more failures
+    } catch (error) {
+      if (mounted &&
+          requestGeneration == _folderRequestGeneration &&
+          folder == _currentFolder) {
+        setState(() => _errorMessage = error.toString());
+      }
     } finally {
-      if (mounted) setState(() => _isLoadingMore = false);
+      if (mounted && requestGeneration == _folderRequestGeneration) {
+        setState(() => _isLoadingMore = false);
+      }
     }
   }
 
   void _onSearchChanged(String value) {
     _searchDebounce?.cancel();
+    _searchRequestGeneration++;
     setState(() {
       _searchQuery = value;
+      _isSearching = false;
       // Only clear results if we're not in from/to mode (those have their own inputs)
       if (value.isEmpty &&
           _searchScope != MailSearchScope.from &&
@@ -199,6 +237,8 @@ class _MailPageState extends State<MailPage> {
 
   void _onSenderChanged(String value) {
     _searchDebounce?.cancel();
+    _searchRequestGeneration++;
+    setState(() => _isSearching = false);
     if (value.trim().isEmpty) {
       setState(() {
         _searchResults = null;
@@ -211,6 +251,8 @@ class _MailPageState extends State<MailPage> {
 
   void _onRecipientChanged(String value) {
     _searchDebounce?.cancel();
+    _searchRequestGeneration++;
+    setState(() => _isSearching = false);
     if (value.trim().isEmpty) {
       setState(() {
         _searchResults = null;
@@ -222,9 +264,10 @@ class _MailPageState extends State<MailPage> {
   }
 
   Future<void> _runSearch() async {
-    // Determine which query to use based on current scope
+    final scope = _searchScope;
+    final folder = _currentFolder;
     final String query;
-    switch (_searchScope) {
+    switch (scope) {
       case MailSearchScope.from:
         query = _senderController.text.trim();
         break;
@@ -234,38 +277,63 @@ class _MailPageState extends State<MailPage> {
       default:
         query = _searchQuery.trim();
     }
+    final requestGeneration = ++_searchRequestGeneration;
     if (query.isEmpty) {
-      setState(() => _searchResults = null);
+      if (mounted) {
+        setState(() {
+          _searchResults = null;
+          _isSearching = false;
+        });
+      }
       return;
     }
     final credentials = await _getCredentials();
-    if (credentials == null || !mounted) return;
+    if (credentials == null ||
+        !mounted ||
+        requestGeneration != _searchRequestGeneration) {
+      return;
+    }
     setState(() => _isSearching = true);
     try {
       final results = await _mailService.searchFolder(
         credentials: credentials,
         query: query,
-        folder: _currentFolder,
-        searchScope: _searchScope,
+        folder: folder,
+        searchScope: scope,
       );
-      if (!mounted) return;
+      if (!mounted ||
+          requestGeneration != _searchRequestGeneration ||
+          folder != _currentFolder ||
+          scope != _searchScope) {
+        return;
+      }
       setState(() => _searchResults = results);
     } catch (error) {
-      if (!mounted) return;
+      if (!mounted ||
+          requestGeneration != _searchRequestGeneration ||
+          folder != _currentFolder ||
+          scope != _searchScope) {
+        return;
+      }
       ScaffoldMessenger.of(
         context,
       ).showSnackBar(SnackBar(content: Text('搜索失败：$error')));
     } finally {
-      if (mounted) setState(() => _isSearching = false);
+      if (mounted && requestGeneration == _searchRequestGeneration) {
+        setState(() => _isSearching = false);
+      }
     }
   }
 
   void _onScopeChanged(MailSearchScope scope) {
+    _searchDebounce?.cancel();
+    _searchRequestGeneration++;
     // Tapping an already-selected chip toggles it off (back to allText)
     if (_searchScope == scope) {
       setState(() {
         _searchScope = MailSearchScope.allText;
         _searchResults = null;
+        _isSearching = false;
       });
       // Re-run text search if main bar has content
       if (_searchQuery.trim().isNotEmpty) _runSearch();
@@ -274,6 +342,7 @@ class _MailPageState extends State<MailPage> {
     setState(() {
       _searchScope = scope;
       _searchResults = null;
+      _isSearching = false;
     });
     // For from/to, wait for user to type in secondary input
     if (scope == MailSearchScope.from || scope == MailSearchScope.to) return;
@@ -295,12 +364,14 @@ class _MailPageState extends State<MailPage> {
       }
       final detail = await _mailService.readMessage(
         credentials: credentials,
+        folder: message.folder,
         uid: message.uid,
+        expectedMailboxUidValidity: message.mailboxUidValidity,
       );
       if (!mounted) return;
 
-      // Drafts: open in compose for editing instead of read-only view
-      if (_currentFolder == MailFolder.drafts) {
+      // Drafts: open in compose for editing instead of read-only view.
+      if (message.folder == MailFolder.drafts) {
         await Navigator.of(context).push(
           MaterialPageRoute<void>(
             builder: (context) => ComposeMailPage(
@@ -310,10 +381,11 @@ class _MailPageState extends State<MailPage> {
             ),
           ),
         );
-        // Refresh drafts after editing/sending
-        _refreshFolder();
+        if (mounted && _currentFolder == message.folder) {
+          _refreshFolder();
+        }
       } else {
-        _markMessageAsSeen(message.uid);
+        _markMessageAsSeen(message);
         await Navigator.of(context).push(
           MaterialPageRoute<void>(
             builder: (context) => _MailDetailPage(
@@ -350,13 +422,17 @@ class _MailPageState extends State<MailPage> {
     );
   }
 
-  void _markMessageAsSeen(int uid) {
+  void _markMessageAsSeen(MailMessageSummary message) {
     final snapshot = _snapshot;
-    if (snapshot == null) return;
+    if (snapshot == null ||
+        snapshot.folder != message.folder ||
+        snapshot.mailboxUidValidity != message.mailboxUidValidity) {
+      return;
+    }
     final updated = snapshot.messages
-        .map((msg) {
-          if (msg.uid != uid) return msg;
-          return msg.copyWith(isSeen: true);
+        .map((candidate) {
+          if (candidate.uid != message.uid) return candidate;
+          return candidate.copyWith(isSeen: true);
         })
         .toList(growable: false);
     setState(() => _snapshot = snapshot.copyWith(messages: updated));
@@ -380,16 +456,19 @@ class _MailPageState extends State<MailPage> {
   }
 
   Future<void> _deleteSelected() async {
-    if (_selectedUids.isEmpty) return;
+    final snapshot = _snapshot;
+    if (_selectedUids.isEmpty || snapshot == null) return;
     final credentials = await _getCredentials();
-    if (credentials == null) return;
+    if (credentials == null || !mounted) return;
 
-    if (!mounted) return;
+    final folder = snapshot.folder;
+    final mailboxUidValidity = snapshot.mailboxUidValidity;
+    final uids = _selectedUids.toList(growable: false);
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
         title: const Text('确认删除'),
-        content: Text('删除已选中的 ${_selectedUids.length} 封邮件？'),
+        content: Text('删除已选中的 ${uids.length} 封邮件？'),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(context, false),
@@ -403,23 +482,32 @@ class _MailPageState extends State<MailPage> {
         ],
       ),
     );
-    if (confirmed != true || !mounted) return;
+    if (confirmed != true ||
+        !mounted ||
+        _currentFolder != folder ||
+        _snapshot?.mailboxUidValidity != mailboxUidValidity) {
+      return;
+    }
 
     setState(() => _isDeleting = true);
     try {
-      final uids = _selectedUids.toList();
       await _mailService.deleteMessages(
         credentials: credentials,
-        folder: _currentFolder,
+        folder: folder,
         uids: uids,
+        expectedMailboxUidValidity: mailboxUidValidity,
       );
-      if (!mounted) return;
-      final snapshot = _snapshot;
-      if (snapshot != null) {
+      if (!mounted ||
+          _currentFolder != folder ||
+          _snapshot?.mailboxUidValidity != mailboxUidValidity) {
+        return;
+      }
+      final currentSnapshot = _snapshot;
+      if (currentSnapshot != null) {
         setState(() {
-          _snapshot = snapshot.copyWith(
-            messages: snapshot.messages
-                .where((m) => !_selectedUids.contains(m.uid))
+          _snapshot = currentSnapshot.copyWith(
+            messages: currentSnapshot.messages
+                .where((message) => !uids.contains(message.uid))
                 .toList(),
           );
           _isMultiSelectMode = false;
@@ -829,16 +917,22 @@ class _MailPageState extends State<MailPage> {
   }
 
   Future<void> _restoreSelected() async {
-    if (_selectedUids.isEmpty) return;
+    final snapshot = _snapshot;
+    if (_selectedUids.isEmpty ||
+        snapshot == null ||
+        snapshot.folder != MailFolder.trash) {
+      return;
+    }
     final credentials = await _getCredentials();
-    if (credentials == null) return;
+    if (credentials == null || !mounted) return;
 
-    if (!mounted) return;
+    final mailboxUidValidity = snapshot.mailboxUidValidity;
+    final uids = _selectedUids.toList(growable: false);
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
         title: const Text('确认恢复'),
-        content: Text('将已选 ${_selectedUids.length} 封邮件恢复到原文件夹？'),
+        content: Text('将已选 ${uids.length} 封邮件恢复到原文件夹？'),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(context, false),
@@ -854,23 +948,32 @@ class _MailPageState extends State<MailPage> {
         ],
       ),
     );
-    if (confirmed != true || !mounted) return;
+    if (confirmed != true ||
+        !mounted ||
+        _currentFolder != MailFolder.trash ||
+        _snapshot?.mailboxUidValidity != mailboxUidValidity) {
+      return;
+    }
 
     setState(() => _isDeleting = true);
     try {
-      final uids = _selectedUids.toList();
       await _mailService.restoreMessages(
         credentials: credentials,
         uids: uids,
         userEmailAddress: credentials.emailAddress,
+        expectedMailboxUidValidity: mailboxUidValidity,
       );
-      if (!mounted) return;
-      final snapshot = _snapshot;
-      if (snapshot != null) {
+      if (!mounted ||
+          _currentFolder != MailFolder.trash ||
+          _snapshot?.mailboxUidValidity != mailboxUidValidity) {
+        return;
+      }
+      final currentSnapshot = _snapshot;
+      if (currentSnapshot != null) {
         setState(() {
-          _snapshot = snapshot.copyWith(
-            messages: snapshot.messages
-                .where((m) => !_selectedUids.contains(m.uid))
+          _snapshot = currentSnapshot.copyWith(
+            messages: currentSnapshot.messages
+                .where((message) => !uids.contains(message.uid))
                 .toList(),
           );
           _isMultiSelectMode = false;
@@ -1106,7 +1209,9 @@ class _ComposeMailPageState extends State<ComposeMailPage> {
   late final TextEditingController _bodyController;
 
   int? _draftUid;
+  int? _draftMailboxUidValidity;
   Timer? _draftTimer;
+  Future<void>? _draftSaveFuture;
   late String _lastSavedTo;
   late String _lastSavedCc;
   late String _lastSavedSubject;
@@ -1129,6 +1234,7 @@ class _ComposeMailPageState extends State<ComposeMailPage> {
       _subjectController = TextEditingController(text: draft.subject);
       _bodyController = TextEditingController(text: draft.body);
       _draftUid = draft.uid;
+      _draftMailboxUidValidity = draft.mailboxUidValidity;
     } else if (replyTo != null) {
       // Reply
       _toController = TextEditingController(
@@ -1178,21 +1284,40 @@ class _ComposeMailPageState extends State<ComposeMailPage> {
       _bodyController.text != _lastSavedBody;
 
   Future<void> _autoSaveDraft() async {
-    if (!_hasChanges || !mounted) return;
+    if (!_hasChanges || !mounted || _isSavingDraft || _isSending) return;
+    final operation = _saveDraftChanges();
+    _draftSaveFuture = operation;
+    try {
+      await operation;
+    } finally {
+      if (identical(_draftSaveFuture, operation)) {
+        _draftSaveFuture = null;
+      }
+    }
+  }
+
+  Future<void> _saveDraftChanges() async {
+    final savedTo = _toController.text;
+    final savedCc = _ccController.text;
+    final savedSubject = _subjectController.text;
+    final savedBody = _bodyController.text;
+    final composeData = _buildComposeData();
     setState(() => _isSavingDraft = true);
     try {
-      final newUid = await widget.mailService.saveDraft(
+      final draftIdentity = await widget.mailService.saveDraft(
         credentials: widget.credentials,
-        composeData: _buildComposeData(),
+        composeData: composeData,
         existingDraftUid: _draftUid,
+        expectedMailboxUidValidity: _draftMailboxUidValidity,
       );
       if (!mounted) return;
       setState(() {
-        _draftUid = newUid;
-        _lastSavedTo = _toController.text;
-        _lastSavedCc = _ccController.text;
-        _lastSavedSubject = _subjectController.text;
-        _lastSavedBody = _bodyController.text;
+        _draftUid = draftIdentity?.uid;
+        _draftMailboxUidValidity = draftIdentity?.mailboxUidValidity;
+        _lastSavedTo = savedTo;
+        _lastSavedCc = savedCc;
+        _lastSavedSubject = savedSubject;
+        _lastSavedBody = savedBody;
       });
     } catch (_) {
       // best-effort
@@ -1261,6 +1386,8 @@ class _ComposeMailPageState extends State<ComposeMailPage> {
     _draftTimer?.cancel();
     setState(() => _isSending = true);
     try {
+      await _draftSaveFuture;
+      if (!mounted) return;
       await widget.mailService.sendEmail(
         credentials: widget.credentials,
         composeData: _buildComposeData(),
@@ -1273,6 +1400,7 @@ class _ComposeMailPageState extends State<ComposeMailPage> {
             credentials: widget.credentials,
             folder: MailFolder.drafts,
             uids: [draftUid],
+            expectedMailboxUidValidity: _draftMailboxUidValidity,
           );
         } catch (_) {}
       }
@@ -1292,18 +1420,14 @@ class _ComposeMailPageState extends State<ComposeMailPage> {
 
   Future<void> _onCancel() async {
     _draftTimer?.cancel();
+    await _draftSaveFuture;
+    if (!mounted) return;
     final hasContent =
         _toController.text.isNotEmpty ||
         _subjectController.text.isNotEmpty ||
         _bodyController.text.isNotEmpty;
     if (_hasChanges && hasContent) {
-      try {
-        await widget.mailService.saveDraft(
-          credentials: widget.credentials,
-          composeData: _buildComposeData(),
-          existingDraftUid: _draftUid,
-        );
-      } catch (_) {}
+      await _saveDraftChanges();
     }
     if (mounted) Navigator.of(context).pop();
   }
@@ -1794,18 +1918,27 @@ class _MailDetailPageState extends State<_MailDetailPage> {
     try {
       final bytes = await widget.mailService.downloadAttachment(
         credentials: widget.credentials,
+        folder: widget.detail.folder,
         uid: widget.detail.uid,
         partId: partId,
+        expectedMailboxUidValidity: widget.detail.mailboxUidValidity,
       );
       final cacheDirPath = await _nativeActions
           .getMailAttachmentCacheDirectory();
       final fileName = mailAttachmentCacheFileName(
+        accountId: widget.credentials.emailAddress,
+        mailbox: widget.detail.folder.name,
+        messageId: widget.detail.messageId,
+        mailboxUidValidity: widget.detail.mailboxUidValidity,
         messageUid: widget.detail.uid,
         partId: partId,
         originalName: attachment.name,
       );
       final file = File('$cacheDirPath/$fileName');
-      final temporaryFile = File('${file.path}.partial');
+      final temporaryFile = File(
+        '$cacheDirPath/.${DateTime.now().microsecondsSinceEpoch}.'
+        '${Random.secure().nextInt(1 << 32)}.partial',
+      );
       try {
         await temporaryFile.writeAsBytes(bytes, flush: true);
         await temporaryFile.rename(file.path);
@@ -1814,6 +1947,7 @@ class _MailDetailPageState extends State<_MailDetailPage> {
           await temporaryFile.delete();
         }
       }
+      if (!mounted) return;
       final mimeType = attachment.mimeType.split(';').first.trim();
       await _nativeActions.openFile(
         path: file.path,
@@ -1915,8 +2049,9 @@ class _MailDetailPageState extends State<_MailDetailPage> {
             child: hasHtmlBody
                 ? NativeHtmlMailView(
                     htmlContent: htmlBody,
-                    baseUrl: AppConfig.normalizedBaseUrl(
+                    baseUrl: AppConfig.normalizedHttpsBaseUrl(
                       AppConfig.mailWebBaseUrl,
+                      settingName: 'BNBU_MAIL_WEB_BASE_URL',
                     ),
                   )
                 : SelectionArea(

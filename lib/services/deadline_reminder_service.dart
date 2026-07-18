@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/foundation.dart';
@@ -35,76 +36,99 @@ class DeadlineReminderService {
 
   final FlutterLocalNotificationsPlugin _notificationsPlugin;
   Future<void>? _initializationFuture;
+  Future<void> _notificationMutation = Future<void>.value();
 
   Future<bool> loadEnabled() async {
     final preferences = await SharedPreferences.getInstance();
     return preferences.getBool(_enabledPreferenceKey) ?? false;
   }
 
-  Future<String?> enable() async {
-    if (kIsWeb) {
-      return '当前平台暂不支持 DDL 提醒。';
-    }
-    await _ensureInitialized();
-    final permissionError = await _requestPermissions();
-    if (permissionError != null) {
+  Future<String?> enable() {
+    return _withNotificationMutation(() async {
+      if (kIsWeb) {
+        return '当前平台暂不支持 DDL 提醒。';
+      }
+      await _ensureInitialized();
+      final permissionError = await _requestPermissions();
+      if (permissionError != null) {
+        await _setEnabled(false);
+        await _cancelAll();
+        return permissionError;
+      }
+      await _setEnabled(true);
+      return null;
+    });
+  }
+
+  Future<void> disable() {
+    return _withNotificationMutation(() async {
       await _setEnabled(false);
-      await cancelAll();
-      return permissionError;
-    }
-    await _setEnabled(true);
-    return null;
+      await _cancelAll();
+    });
   }
 
-  Future<void> disable() async {
-    await _setEnabled(false);
-    await cancelAll();
-  }
+  Future<void> synchronize(List<TimelineItem> items) {
+    return _withNotificationMutation(() async {
+      if (!await loadEnabled()) {
+        return;
+      }
+      await _ensureInitialized();
+      await _notificationsPlugin.cancelAll();
 
-  Future<void> synchronize(List<TimelineItem> items) async {
-    if (!await loadEnabled()) {
-      return;
-    }
-    await _ensureInitialized();
-    await _notificationsPlugin.cancelAll();
+      final reminders = _buildPendingReminders(items);
+      final limit = Platform.isIOS
+          ? reminders.length.clamp(0, _iosPendingNotificationLimit)
+          : reminders.length;
 
-    final reminders = _buildPendingReminders(items);
-    final limit = Platform.isIOS
-        ? reminders.length.clamp(0, _iosPendingNotificationLimit)
-        : reminders.length;
-
-    final details = NotificationDetails(
-      android: const AndroidNotificationDetails(
-        _channelId,
-        _channelName,
-        channelDescription: _channelDescription,
-        importance: Importance.max,
-        priority: Priority.high,
-        icon: 'ic_notification',
-      ),
-      iOS: const DarwinNotificationDetails(
-        presentAlert: true,
-        presentBadge: false,
-        presentSound: true,
-      ),
-    );
-
-    for (final reminder in reminders.take(limit)) {
-      await _notificationsPlugin.zonedSchedule(
-        id: reminder.id,
-        title: reminder.title,
-        body: reminder.body,
-        scheduledDate: tz.TZDateTime.from(reminder.triggerAt, tz.local),
-        notificationDetails: details,
-        androidScheduleMode: AndroidScheduleMode.exactAllowWhileIdle,
-        payload: reminder.payload,
+      final details = NotificationDetails(
+        android: const AndroidNotificationDetails(
+          _channelId,
+          _channelName,
+          channelDescription: _channelDescription,
+          importance: Importance.max,
+          priority: Priority.high,
+          icon: 'ic_notification',
+        ),
+        iOS: const DarwinNotificationDetails(
+          presentAlert: true,
+          presentBadge: false,
+          presentSound: true,
+        ),
       );
-    }
+
+      for (final reminder in reminders.take(limit)) {
+        await _notificationsPlugin.zonedSchedule(
+          id: reminder.id,
+          title: reminder.title,
+          body: reminder.body,
+          scheduledDate: tz.TZDateTime.from(reminder.triggerAt, tz.local),
+          notificationDetails: details,
+          androidScheduleMode: AndroidScheduleMode.exactAllowWhileIdle,
+          payload: reminder.payload,
+        );
+      }
+    });
   }
 
-  Future<void> cancelAll() async {
+  Future<void> cancelAll() {
+    return _withNotificationMutation(_cancelAll);
+  }
+
+  Future<void> _cancelAll() async {
     await _ensureInitialized();
     await _notificationsPlugin.cancelAll();
+  }
+
+  Future<T> _withNotificationMutation<T>(Future<T> Function() operation) async {
+    final previous = _notificationMutation;
+    final completer = Completer<void>();
+    _notificationMutation = completer.future;
+    await previous;
+    try {
+      return await operation();
+    } finally {
+      completer.complete();
+    }
   }
 
   Future<void> _ensureInitialized() {

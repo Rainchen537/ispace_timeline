@@ -52,6 +52,8 @@ class MailMessageSummary {
     required this.date,
     required this.isSeen,
     this.hasAttachments = false,
+    this.folder = MailFolder.inbox,
+    this.mailboxUidValidity,
   });
 
   final int uid;
@@ -62,6 +64,8 @@ class MailMessageSummary {
   final DateTime? date;
   final bool isSeen;
   final bool hasAttachments;
+  final MailFolder folder;
+  final int? mailboxUidValidity;
 
   MailMessageSummary copyWith({
     int? uid,
@@ -72,6 +76,8 @@ class MailMessageSummary {
     DateTime? date,
     bool? isSeen,
     bool? hasAttachments,
+    MailFolder? folder,
+    int? mailboxUidValidity,
   }) {
     return MailMessageSummary(
       uid: uid ?? this.uid,
@@ -82,6 +88,8 @@ class MailMessageSummary {
       date: date ?? this.date,
       isSeen: isSeen ?? this.isSeen,
       hasAttachments: hasAttachments ?? this.hasAttachments,
+      folder: folder ?? this.folder,
+      mailboxUidValidity: mailboxUidValidity ?? this.mailboxUidValidity,
     );
   }
 }
@@ -99,6 +107,8 @@ class MailMessageDetail {
     required this.isSeen,
     this.attachments = const [],
     this.messageId,
+    this.mailboxUidValidity,
+    this.folder = MailFolder.inbox,
   });
 
   final int uid;
@@ -112,6 +122,8 @@ class MailMessageDetail {
   final bool isSeen;
   final List<MailAttachment> attachments;
   final String? messageId;
+  final int? mailboxUidValidity;
+  final MailFolder folder;
 }
 
 class MailFolderSnapshot {
@@ -125,6 +137,7 @@ class MailFolderSnapshot {
     required this.totalMessages,
     required this.currentPage,
     required this.pageSize,
+    this.mailboxUidValidity,
   });
 
   final String emailAddress;
@@ -136,6 +149,7 @@ class MailFolderSnapshot {
   final int totalMessages;
   final int currentPage;
   final int pageSize;
+  final int? mailboxUidValidity;
 
   int get unreadCount => messages.where((message) => !message.isSeen).length;
 
@@ -149,6 +163,7 @@ class MailFolderSnapshot {
     int? totalMessages,
     int? currentPage,
     int? pageSize,
+    int? mailboxUidValidity,
   }) {
     return MailFolderSnapshot(
       emailAddress: emailAddress ?? this.emailAddress,
@@ -160,8 +175,19 @@ class MailFolderSnapshot {
       totalMessages: totalMessages ?? this.totalMessages,
       currentPage: currentPage ?? this.currentPage,
       pageSize: pageSize ?? this.pageSize,
+      mailboxUidValidity: mailboxUidValidity ?? this.mailboxUidValidity,
     );
   }
+}
+
+class MailDraftIdentity {
+  const MailDraftIdentity({
+    required this.uid,
+    required this.mailboxUidValidity,
+  });
+
+  final int uid;
+  final int mailboxUidValidity;
 }
 
 class MailComposeData {

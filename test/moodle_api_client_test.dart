@@ -1,9 +1,55 @@
 import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:http/http.dart' as http;
+import 'package:http/testing.dart';
 import 'package:ispace_timeline/services/moodle_api_client.dart';
 
 void main() {
+  group('login error classification', () {
+    test('classifies only invalidlogin as an authentication failure', () async {
+      final client = MoodleApiClient(
+        baseUrl: 'https://ispace.example.edu',
+        client: MockClient((_) async {
+          return http.Response(
+            '{"error":"Invalid login","errorcode":"invalidlogin"}',
+            200,
+          );
+        }),
+      );
+      addTearDown(client.dispose);
+
+      expect(
+        () => client.loginWithPassword(username: 'student', password: 'wrong'),
+        throwsA(isA<MoodleAuthenticationException>()),
+      );
+    });
+
+    test('keeps service failures distinct from invalid credentials', () async {
+      final client = MoodleApiClient(
+        baseUrl: 'https://ispace.example.edu',
+        client: MockClient((_) async {
+          return http.Response(
+            '{"error":"Service unavailable","errorcode":"servicenotavailable"}',
+            200,
+          );
+        }),
+      );
+      addTearDown(client.dispose);
+
+      expect(
+        () => client.loginWithPassword(username: 'student', password: 'secret'),
+        throwsA(
+          isA<MoodleApiException>().having(
+            (error) => error,
+            'runtime type',
+            isNot(isA<MoodleAuthenticationException>()),
+          ),
+        ),
+      );
+    });
+  });
+
   group('web cookie isolation', () {
     late MoodleApiClient client;
 

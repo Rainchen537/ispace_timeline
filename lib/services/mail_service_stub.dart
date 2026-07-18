@@ -10,6 +10,7 @@ class MailServiceImpl extends MailService {
     MailFolder folder = MailFolder.inbox,
     int page = 1,
     int pageSize = 25,
+    int? expectedMailboxUidValidity,
   }) async {
     throw UnimplementedError();
   }
@@ -27,7 +28,9 @@ class MailServiceImpl extends MailService {
   @override
   Future<MailMessageDetail> readMessage({
     required MailAccessCredentials credentials,
+    required MailFolder folder,
     required int uid,
+    int? expectedMailboxUidValidity,
   }) async {
     throw UnimplementedError();
   }
@@ -35,8 +38,10 @@ class MailServiceImpl extends MailService {
   @override
   Future<List<int>> downloadAttachment({
     required MailAccessCredentials credentials,
+    required MailFolder folder,
     required int uid,
     required String partId,
+    int? expectedMailboxUidValidity,
   }) async {
     throw UnimplementedError();
   }
@@ -50,10 +55,11 @@ class MailServiceImpl extends MailService {
   }
 
   @override
-  Future<int?> saveDraft({
+  Future<MailDraftIdentity?> saveDraft({
     required MailAccessCredentials credentials,
     required MailComposeData composeData,
     int? existingDraftUid,
+    int? expectedMailboxUidValidity,
   }) async {
     throw UnimplementedError();
   }
@@ -63,6 +69,7 @@ class MailServiceImpl extends MailService {
     required MailAccessCredentials credentials,
     required MailFolder folder,
     required List<int> uids,
+    int? expectedMailboxUidValidity,
   }) async {
     throw UnimplementedError();
   }
@@ -72,6 +79,7 @@ class MailServiceImpl extends MailService {
     required MailAccessCredentials credentials,
     required List<int> uids,
     required String userEmailAddress,
+    int? expectedMailboxUidValidity,
   }) async {}
 
   @override

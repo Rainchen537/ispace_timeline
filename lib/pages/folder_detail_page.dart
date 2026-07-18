@@ -471,19 +471,28 @@ class _FolderDetailPageState extends State<FolderDetailPage> {
       cookieOrigin = '';
     }
     try {
-      await _nativeActionsChannel.invokeMethod('downloadFile', {
-        'url': _downloadFolderUrl,
-        'filename': fileName,
-        'title': widget.module.name,
-        if (cookieHeader.isNotEmpty) 'cookieHeader': cookieHeader,
-        if (cookieOrigin.isNotEmpty) 'cookieOrigin': cookieOrigin,
-      });
+      final downloadResult = await _nativeActionsChannel
+          .invokeMethod<dynamic>('downloadFile', {
+            'url': _downloadFolderUrl,
+            'filename': fileName,
+            'title': widget.module.name,
+            if (cookieHeader.isNotEmpty) 'cookieHeader': cookieHeader,
+            if (cookieOrigin.isNotEmpty) 'cookieOrigin': cookieOrigin,
+          });
       if (!mounted) {
         return;
       }
+      final completedName = downloadedFileDisplayName(
+        downloadResult,
+        fallback: fileName,
+      );
+      final message =
+          downloadResult is String && downloadResult.trim().isNotEmpty
+          ? '下载完成：$completedName'
+          : '已开始下载：$fileName';
       ScaffoldMessenger.of(
         context,
-      ).showSnackBar(SnackBar(content: Text('已开始下载：$fileName')));
+      ).showSnackBar(SnackBar(content: Text(message)));
     } on PlatformException {
       if (!mounted) {
         return;

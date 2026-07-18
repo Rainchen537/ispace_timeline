@@ -26,14 +26,17 @@ class BnbuMisClient {
         'Chrome/145.0.0.0 Safari/537.36 Edg/145.0.0.0';
   }
 
-  static final String _ssoBaseUrl = AppConfig.normalizedBaseUrl(
+  static final String _ssoBaseUrl = AppConfig.normalizedHttpsBaseUrl(
     AppConfig.bnbuSsoBaseUrl,
+    settingName: 'BNBU_SSO_BASE_URL',
   );
-  static final String _misBaseUrl = AppConfig.normalizedBaseUrl(
+  static final String _misBaseUrl = AppConfig.normalizedHttpsBaseUrl(
     AppConfig.bnbuMisBaseUrl,
+    settingName: 'BNBU_MIS_BASE_URL',
   );
-  static final String _portalBaseUrl = AppConfig.normalizedBaseUrl(
+  static final String _portalBaseUrl = AppConfig.normalizedHttpsBaseUrl(
     AppConfig.bnbuPortalBaseUrl,
+    settingName: 'BNBU_PORTAL_BASE_URL',
   );
   static final String _cookieDomain = AppConfig.normalizedCookieDomain(
     AppConfig.bnbuCookieDomain,

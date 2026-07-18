@@ -1,5 +1,5 @@
-import 'dart:io';
 import 'dart:convert';
+import 'dart:io';
 
 import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
@@ -34,10 +34,17 @@ class MoodleApiException implements Exception {
   String toString() => 'MoodleApiException($message)';
 }
 
+class MoodleAuthenticationException extends MoodleApiException {
+  MoodleAuthenticationException(super.message);
+}
+
 class MoodleApiClient {
   MoodleApiClient({http.Client? client, String? baseUrl, String? cookieDomain})
     : _httpClient = client ?? http.Client(),
-      baseUrl = AppConfig.normalizedBaseUrl(baseUrl ?? AppConfig.ispaceBaseUrl),
+      baseUrl = AppConfig.normalizedHttpsBaseUrl(
+        baseUrl ?? AppConfig.ispaceBaseUrl,
+        settingName: 'ISPACE_BASE_URL',
+      ),
       cookieDomain = AppConfig.normalizedCookieDomain(
         cookieDomain ?? AppConfig.ispaceCookieDomain,
       ) {
@@ -111,6 +118,10 @@ class MoodleApiClient {
     final token = (json['token'] as String?)?.trim();
     if (token == null || token.isEmpty) {
       final message = _extractWsError(json, fallback: '未获取到 token，登录失败。');
+      final errorCode = (json['errorcode'] as String?)?.trim().toLowerCase();
+      if (errorCode == 'invalidlogin') {
+        throw MoodleAuthenticationException(message);
+      }
       throw MoodleApiException(message);
     }
 

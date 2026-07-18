@@ -11,17 +11,27 @@ class AppEntryPage extends StatefulWidget {
   State<AppEntryPage> createState() => _AppEntryPageState();
 }
 
-class _AppEntryPageState extends State<AppEntryPage> {
+class _AppEntryPageState extends State<AppEntryPage>
+    with WidgetsBindingObserver {
   final AppSessionController _controller = AppSessionController();
 
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _controller.restoreSessionIfPossible();
   }
 
   @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      _controller.restoreSessionIfPossible();
+    }
+  }
+
+  @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _controller.dispose();
     super.dispose();
   }

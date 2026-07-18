@@ -97,19 +97,22 @@ flutter run --dart-define-from-file=config/dart_defines.local.json
 规则：
 
 - 不得在页面或服务中新增硬编码环境地址；
-- Base URL 不带结尾 `/`；
+- 所有携带凭据的 Base URL 必须使用 HTTPS，且不得包含 userinfo、query、fragment 或结尾 `/`；
 - `ISPACE_COOKIE_DOMAIN` 和 `BNBU_COOKIE_DOMAIN` 只能配置为学校实际控制的最小可信域边界，禁止使用公共后缀；
 - `config/dart_defines.local.json` 不得提交；
 - 密码、token、签名口令和私钥不得放入 Dart define、源码、日志或 Git。
 
 ## 安全与隐私
 
-- 登录凭据只能通过 `CredentialStore` 保存到系统安全存储；
-- Android 使用 `flutter_secure_storage` 的加密存储，iOS 使用 Keychain；
-- 原生 `SharedPreferences`/`UserDefaults` 通道只允许迁移和清除旧版本遗留凭据，禁止重新写入密码；
-- 退出登录必须等待持久化凭据、通知和 Web 会话清理完成；
-- 文件名、URL、HTML 和平台通道参数均视为不可信输入；
-- token 只能发送到其配置来源的同源地址；Cookie 只能发送到明确配置的平台来源，父域 Cookie 只能在配置的最小可信域边界内共享；禁止向其他外部 URL 装饰或转发凭据；
+- 登录凭据只能通过 `CredentialStore` 保存；凭据记录固定为 `bnbu.credentials.v1` 单 JSON 记录；
+- Android 主记录由原生 `EncryptedSharedPreferences` 在工作线程执行 checked `commit()`；不得退回安全敏感写入使用异步 `apply()` 的实现。iOS 主记录使用 Keychain；
+- logout 必须先写 durable no-restore tombstone，再撤销内存会话并删除所有凭据副本。Android tombstone 使用独立同步 `SharedPreferences`，iOS 同时使用 `UserDefaults` 和 Keychain；成功保存新主记录后先移除 tombstone，再清理旧副本；
+- 旧 combined/split secure record 和原生明文记录采用 secure-first、cleanup-convergent 迁移；清理失败必须可观察并在后续 load 重试，损坏 combined record 禁止降级到旧凭据；
+- `AppSessionController` 的 credential mutation、auth generation、共享 logout Future 和 reminder mutation 串行化不得绕过；logout 期间禁止启动新 login，异步结果必须在发布前检查 generation；
+- 文件名、URL、HTML、重定向目标和平台通道参数均视为不可信输入；附件/下载必须使用唯一临时文件和原子发布，邮件缓存身份至少包含账号、mailbox、UIDVALIDITY、Message-ID、UID 和 MIME part；
+- 所有 `MailClient` 操作必须经过同一串行队列；读取、附件、分页、草稿替换、删除和恢复不得只凭 UID 操作，必须携带并校验 mailbox 与 UIDVALIDITY。新草稿的 APPENDUID 结果必须同时保留 UID 和 UIDVALIDITY；
+- token 只能发送到其配置来源的同源地址；Cookie 只能发送到明确配置的平台来源，跨来源重定向必须移除 Cookie，HTTPS 下载不得降级到 HTTP；同源重定向中的 Cookie 更新可继续用于后续同源请求；
+- Android/iOS 原生下载必须拒绝意外登录 HTML、优先采用响应文件名并清理文件名。Android API 23–28 写公共 Downloads 前请求旧版存储权限，API 29+ 使用 MediaStore；分享缓存必须使用随机目录并执行失败清理和过期清理；
 - HTML 邮件默认禁用 JavaScript、持久化 Web 存储、第三方 Cookie 和远程内容；
 - 不得记录密码、token、Cookie、邮件正文或其他个人信息；
 - 修改数据处理行为时，必须同步更新登录页说明、README 和 `handsbnbu` 隐私政策。
@@ -122,17 +125,21 @@ flutter run --dart-define-from-file=config/dart_defines.local.json
 - 网络测试必须使用 fake/mock，不得依赖真实学校账号；
 - Android/iOS 通道名称和参数改动时，两端实现及 Dart 测试必须同步更新。
 
-CI 会检查格式、静态分析、测试、Android debug 构建和 iOS 无签名构建。
+CI 会检查 locked dependency resolution、格式、静态分析、测试、Android debug 构建、Android unsigned-release 门禁和 iOS 无签名构建；lockfile 在解析前快照，最终比较必须使用 `if: always()`，不得因前序失败而跳过。
 
 ## 发布要求
 
-应用标识统一为：
+发布身份按平台保持现有商店连续性，不得“统一”改写：
 
 ```text
-com.rainchen537.handsbnbu
+Android applicationId: com.example.ispace_timeline
+Android namespace:     com.rainchen537.handsbnbu
+iOS Bundle ID:         com.example.ispaceTimeline
+App Store ID:          6760137657
+当前版本:              1.1.1+2026071901
 ```
 
-Android release 禁止使用 debug 签名。发布前：
+Android `namespace` 不是商店身份。Android release 禁止使用 debug 签名。发布前：
 
 ```bash
 cp android/key.properties.example android/key.properties
@@ -140,7 +147,7 @@ cp android/key.properties.example android/key.properties
 flutter build appbundle --release
 ```
 
-`android/key.properties`、`.jks`、`.keystore`、Apple 证书和 Provisioning Profile 均不得提交。
+`android/key.properties`、`.jks`、`.keystore`、`.p12`、`.mobileprovision`、Apple 证书和签名口令均不得提交。Android upload key/Play App Signing lineage 无法从仓库独立证明，正式发布前必须由发布负责人核对现有商店记录；不得生成新密钥冒充既有发布身份。
 
 发布前还必须：
 
@@ -169,4 +176,4 @@ docs: ...
 chore: ...
 ```
 
-提交应保持单一目的。推送前检查 `git diff`、`git status` 和测试结果，不得提交构建产物、本机路径或敏感配置。
+提交应保持单一目的。推送前检查 `git diff`、`git status`、`git diff --check`、lockfile 和验证结果；不得提交 `config/dart_defines.local.json`、`android/key.properties`、签名材料、APK、`build/`、`_site/`、`/tmp/ispace-*` 或其他本机缓存和敏感配置。

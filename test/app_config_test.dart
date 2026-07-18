@@ -27,6 +27,58 @@ void main() {
     );
   });
 
+  test('HTTPS base URLs reject credential-bearing or ambiguous values', () {
+    expect(
+      AppConfig.normalizedHttpsBaseUrl(
+        ' https://example.com/// ',
+        settingName: 'TEST_BASE_URL',
+      ),
+      'https://example.com',
+    );
+
+    for (final value in [
+      'http://example.com',
+      'https://user:pass@example.com',
+      'https://@example.com',
+      'https://example.com/path?next=other',
+      'https://example.com?',
+      'https://example.com/#fragment',
+      'https://example.com#',
+      'example.com',
+    ]) {
+      expect(
+        () => AppConfig.normalizedHttpsBaseUrl(
+          value,
+          settingName: 'TEST_BASE_URL',
+        ),
+        throwsFormatException,
+      );
+    }
+  });
+
+  test('mail hosts reject schemes, ports, and paths', () {
+    expect(
+      AppConfig.normalizedMailHost(
+        ' IMAP.EXAMPLE.COM ',
+        settingName: 'TEST_MAIL_HOST',
+      ),
+      'imap.example.com',
+    );
+
+    for (final value in [
+      'https://imap.example.com',
+      'imap.example.com:993',
+      'imap.example.com/path',
+      '',
+    ]) {
+      expect(
+        () =>
+            AppConfig.normalizedMailHost(value, settingName: 'TEST_MAIL_HOST'),
+        throwsFormatException,
+      );
+    }
+  });
+
   test('cookie trust boundaries are normalized school domains', () {
     expect(AppConfig.ispaceCookieDomain, 'uic.edu.cn');
     expect(AppConfig.bnbuCookieDomain, 'bnbu.edu.cn');

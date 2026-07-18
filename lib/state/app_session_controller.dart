@@ -19,6 +19,8 @@ import '../services/deadline_reminder_service.dart';
 import '../services/moodle_api_client.dart';
 import '../services/native_actions.dart';
 
+enum _LoginOutcome { succeeded, permanentFailure, transientFailure, cancelled }
+
 class AppSessionController extends ChangeNotifier {
   AppSessionController({
     MoodleApiClient? apiClient,
@@ -65,6 +67,7 @@ class AppSessionController extends ChangeNotifier {
   bool _isLoadingDeadlineReminderPreference = true;
   bool _isUpdatingDeadlineReminder = false;
   Future<AuthSession?>? _reloginFuture;
+  Future<void>? _logoutFuture;
   Future<void> _credentialMutation = Future<void>.value();
   int _authGeneration = 0;
 
@@ -118,7 +121,27 @@ class AppSessionController extends ChangeNotifier {
     bool fromStorage = false,
     bool persistCredentials = true,
   }) async {
+    await _login(
+      username: username,
+      password: password,
+      fromStorage: fromStorage,
+      persistCredentials: persistCredentials,
+    );
+  }
+
+  Future<_LoginOutcome> _login({
+    required String username,
+    required String password,
+    required bool fromStorage,
+    required bool persistCredentials,
+  }) async {
+    if (_isLoggingOut || _logoutFuture != null) {
+      _error = '退出登录处理中，请稍后再登录。';
+      notifyListeners();
+      return _LoginOutcome.cancelled;
+    }
     _didAttemptRestore = true;
+    final authGeneration = ++_authGeneration;
     _isLoggingIn = true;
     _error = null;
     notifyListeners();
@@ -128,9 +151,20 @@ class AppSessionController extends ChangeNotifier {
         username: username,
         password: password,
       );
+      if (!_isCurrentAuthOperation(authGeneration)) {
+        return _LoginOutcome.cancelled;
+      }
       _persistSession(session: session, username: username, password: password);
+      var credentialsSaved = true;
       if (persistCredentials) {
-        await _saveCredentials(username: username, password: password);
+        credentialsSaved = await _saveCredentials(
+          username: username,
+          password: password,
+          expectedAuthGeneration: authGeneration,
+        );
+      }
+      if (!_isCurrentAuthOperation(authGeneration)) {
+        return _LoginOutcome.cancelled;
       }
       notifyListeners();
       await Future.wait([
@@ -139,62 +173,85 @@ class AppSessionController extends ChangeNotifier {
         refreshRecentCourses(),
         refreshPortalProfile(),
       ]);
-    } on MoodleApiException catch (error) {
+      if (!credentialsSaved && _isCurrentAuthOperation(authGeneration)) {
+        const warning = '登录成功，但本地安全存储不可用；下次启动时可能需要重新登录。';
+        _error = _error == null ? warning : '${_error!}\n$warning';
+        notifyListeners();
+      }
+      return _isCurrentAuthOperation(authGeneration)
+          ? _LoginOutcome.succeeded
+          : _LoginOutcome.cancelled;
+    } on MoodleAuthenticationException catch (error) {
+      if (!_isCurrentAuthOperation(authGeneration)) {
+        return _LoginOutcome.cancelled;
+      }
       _error = error.message;
-      _session = null;
-      _username = null;
-      _password = null;
-      _timelineItems = const [];
-      _courses = const [];
-      _recentCourses = const [];
-      _portalProfile = null;
-      _portalProfileError = null;
-      _timetable = null;
-      _timetableError = null;
+      _clearSessionState();
       if (fromStorage) {
-        await _clearSavedCredentials();
+        final cleared = await _clearSavedCredentials(
+          expectedAuthGeneration: authGeneration,
+        );
+        if (!cleared && _isCurrentAuthOperation(authGeneration)) {
+          _error = '${error.message}；本地登录信息清理失败，请再次退出登录。';
+        }
       }
+      if (_isCurrentAuthOperation(authGeneration)) {
+        notifyListeners();
+      }
+      return _LoginOutcome.permanentFailure;
+    } on MoodleApiException catch (error) {
+      if (!_isCurrentAuthOperation(authGeneration)) {
+        return _LoginOutcome.cancelled;
+      }
+      _error = error.message;
+      _clearSessionState();
       notifyListeners();
+      return _LoginOutcome.transientFailure;
     } catch (_) {
-      _error = '登录失败，请检查网络后重试。';
-      _session = null;
-      _username = null;
-      _password = null;
-      _timelineItems = const [];
-      _courses = const [];
-      _recentCourses = const [];
-      _portalProfile = null;
-      _portalProfileError = null;
-      _timetable = null;
-      _timetableError = null;
-      if (fromStorage) {
-        await _clearSavedCredentials();
+      if (!_isCurrentAuthOperation(authGeneration)) {
+        return _LoginOutcome.cancelled;
       }
+      _error = '登录失败，请检查网络后重试。';
+      _clearSessionState();
       notifyListeners();
+      return _LoginOutcome.transientFailure;
     } finally {
-      _isLoggingIn = false;
-      notifyListeners();
+      if (authGeneration == _authGeneration) {
+        _isLoggingIn = false;
+        notifyListeners();
+      }
     }
   }
 
   Future<void> restoreSessionIfPossible() async {
-    if (_didAttemptRestore || _session != null) {
+    if (_didAttemptRestore || _session != null || _isLoggingOut) {
       return;
     }
     _didAttemptRestore = true;
+    final authGeneration = _authGeneration;
     _isRestoringSession = true;
     notifyListeners();
     try {
-      final credentials = await _loadSavedCredentials();
-      if (credentials == null) {
+      final credentials = await _loadSavedCredentialsWithRetry();
+      if (credentials == null ||
+          authGeneration != _authGeneration ||
+          _isLoggingOut) {
         return;
       }
-      await login(
+      final outcome = await _login(
         username: credentials.$1,
         password: credentials.$2,
         fromStorage: true,
         persistCredentials: false,
       );
+      if (outcome == _LoginOutcome.transientFailure && !_isLoggingOut) {
+        _didAttemptRestore = false;
+      }
+    } catch (_) {
+      if (_isCurrentAuthOperation(authGeneration)) {
+        _didAttemptRestore = false;
+        _error = '本地登录信息读取失败，请稍后重试。';
+      }
     } finally {
       _isRestoringSession = false;
       notifyListeners();
@@ -206,6 +263,7 @@ class AppSessionController extends ChangeNotifier {
     if (session == null) {
       return;
     }
+    final authGeneration = _authGeneration;
 
     _isLoadingRecentCourses = true;
     _error = null;
@@ -218,17 +276,28 @@ class AppSessionController extends ChangeNotifier {
           userId: liveSession.userId,
         );
       });
+      if (!_isCurrentAuthOperation(authGeneration)) {
+        return;
+      }
       _recentCourses = courses;
       notifyListeners();
     } on MoodleApiException catch (error) {
+      if (!_isCurrentAuthOperation(authGeneration)) {
+        return;
+      }
       _error = error.message;
       notifyListeners();
     } catch (_) {
+      if (!_isCurrentAuthOperation(authGeneration)) {
+        return;
+      }
       _error = '最近访问课程加载失败，请稍后重试。';
       notifyListeners();
     } finally {
-      _isLoadingRecentCourses = false;
-      notifyListeners();
+      if (authGeneration == _authGeneration) {
+        _isLoadingRecentCourses = false;
+        notifyListeners();
+      }
     }
   }
 
@@ -239,6 +308,7 @@ class AppSessionController extends ChangeNotifier {
       notifyListeners();
       return;
     }
+    final authGeneration = _authGeneration;
 
     _isLoadingTimeline = true;
     _error = null;
@@ -248,18 +318,29 @@ class AppSessionController extends ChangeNotifier {
       final items = await _withSessionRetry((liveSession) {
         return _apiClient.fetchAllTimeline(token: liveSession.token);
       });
+      if (!_isCurrentAuthOperation(authGeneration)) {
+        return;
+      }
       _timelineItems = items;
       notifyListeners();
       unawaited(_syncDeadlineReminders(items));
     } on MoodleApiException catch (error) {
+      if (!_isCurrentAuthOperation(authGeneration)) {
+        return;
+      }
       _error = error.message;
       notifyListeners();
     } catch (_) {
+      if (!_isCurrentAuthOperation(authGeneration)) {
+        return;
+      }
       _error = 'Timeline 拉取失败，请稍后重试。';
       notifyListeners();
     } finally {
-      _isLoadingTimeline = false;
-      notifyListeners();
+      if (authGeneration == _authGeneration) {
+        _isLoadingTimeline = false;
+        notifyListeners();
+      }
     }
   }
 
@@ -268,6 +349,7 @@ class AppSessionController extends ChangeNotifier {
     if (session == null) {
       return;
     }
+    final authGeneration = _authGeneration;
 
     _isLoadingCourses = true;
     _error = null;
@@ -280,25 +362,39 @@ class AppSessionController extends ChangeNotifier {
           userId: liveSession.userId,
         );
       });
+      if (!_isCurrentAuthOperation(authGeneration)) {
+        return;
+      }
       _courses = courses;
       notifyListeners();
     } on MoodleApiException catch (error) {
+      if (!_isCurrentAuthOperation(authGeneration)) {
+        return;
+      }
       _error = error.message;
       notifyListeners();
     } catch (_) {
+      if (!_isCurrentAuthOperation(authGeneration)) {
+        return;
+      }
       _error = '课程列表加载失败，请稍后重试。';
       notifyListeners();
     } finally {
-      _isLoadingCourses = false;
-      notifyListeners();
+      if (authGeneration == _authGeneration) {
+        _isLoadingCourses = false;
+        notifyListeners();
+      }
     }
   }
 
   Future<void> refreshTimetable() async {
+    final authGeneration = _authGeneration;
     final credentials = await _currentCredentials();
-    if (credentials == null) {
-      _timetableError = '请先登录后加载课表。';
-      notifyListeners();
+    if (credentials == null || !_isCurrentAuthOperation(authGeneration)) {
+      if (_isCurrentAuthOperation(authGeneration)) {
+        _timetableError = '请先登录后加载课表。';
+        notifyListeners();
+      }
       return;
     }
 
@@ -311,26 +407,40 @@ class AppSessionController extends ChangeNotifier {
         username: credentials.$1,
         password: credentials.$2,
       );
+      if (!_isCurrentAuthOperation(authGeneration)) {
+        return;
+      }
       _timetable = timetable;
       notifyListeners();
     } on BnbuMisException catch (error) {
+      if (!_isCurrentAuthOperation(authGeneration)) {
+        return;
+      }
       _timetableError = error.message;
       notifyListeners();
     } catch (_) {
+      if (!_isCurrentAuthOperation(authGeneration)) {
+        return;
+      }
       _timetableError = '课表加载失败，请稍后重试。';
       notifyListeners();
     } finally {
-      _isLoadingTimetable = false;
-      notifyListeners();
+      if (authGeneration == _authGeneration) {
+        _isLoadingTimetable = false;
+        notifyListeners();
+      }
     }
   }
 
   Future<void> refreshPortalProfile() async {
+    final authGeneration = _authGeneration;
     final credentials = await _currentCredentials();
-    if (credentials == null) {
-      _portalProfile = null;
-      _portalProfileError = '请先登录后同步统一门户资料。';
-      notifyListeners();
+    if (credentials == null || !_isCurrentAuthOperation(authGeneration)) {
+      if (_isCurrentAuthOperation(authGeneration)) {
+        _portalProfile = null;
+        _portalProfileError = '请先登录后同步统一门户资料。';
+        notifyListeners();
+      }
       return;
     }
 
@@ -343,17 +453,28 @@ class AppSessionController extends ChangeNotifier {
         username: credentials.$1,
         password: credentials.$2,
       );
+      if (!_isCurrentAuthOperation(authGeneration)) {
+        return;
+      }
       _portalProfile = profile;
       notifyListeners();
     } on BnbuMisException catch (error) {
+      if (!_isCurrentAuthOperation(authGeneration)) {
+        return;
+      }
       _portalProfileError = error.message;
       notifyListeners();
     } catch (_) {
+      if (!_isCurrentAuthOperation(authGeneration)) {
+        return;
+      }
       _portalProfileError = '统一门户用户信息加载失败，请稍后重试。';
       notifyListeners();
     } finally {
-      _isLoadingPortalProfile = false;
-      notifyListeners();
+      if (authGeneration == _authGeneration) {
+        _isLoadingPortalProfile = false;
+        notifyListeners();
+      }
     }
   }
 
@@ -394,17 +515,28 @@ class AppSessionController extends ChangeNotifier {
   }
 
   Future<WebSessionSnapshot> prepareWebSession() async {
+    final authGeneration = _authGeneration;
+    if (_isLoggingOut) {
+      throw MoodleApiException('退出登录处理中，请稍后重试。');
+    }
     if (_session == null) {
       await _refreshSessionFromSavedCredentials();
     }
     final credentials = await _currentCredentials();
-    if (credentials == null) {
+    if (credentials == null ||
+        authGeneration != _authGeneration ||
+        _isLoggingOut) {
       throw MoodleApiException('请先登录后再加载官网页面。');
     }
-    return _apiClient.prepareWebSession(
+    final snapshot = await _apiClient.prepareWebSession(
       username: credentials.$1,
       password: credentials.$2,
     );
+    if (authGeneration != _authGeneration || _isLoggingOut) {
+      _apiClient.clearWebSession();
+      throw MoodleApiException('登录状态已变化，请重新打开页面。');
+    }
+    return snapshot;
   }
 
   Future<TimelineDetailData> loadAssignmentDetailByCourseModule({
@@ -472,14 +604,37 @@ class AppSessionController extends ChangeNotifier {
     notifyListeners();
   }
 
-  Future<void> logout() async {
-    if (_isLoggingOut) {
-      return;
+  Future<void> logout() {
+    final activeLogout = _logoutFuture;
+    if (activeLogout != null) {
+      return activeLogout;
     }
 
+    final completer = Completer<void>();
+    final logoutFuture = completer.future;
+    _logoutFuture = logoutFuture;
+    unawaited(() async {
+      try {
+        await _performLogout();
+        completer.complete();
+      } catch (error, stackTrace) {
+        completer.completeError(error, stackTrace);
+      } finally {
+        if (identical(_logoutFuture, logoutFuture)) {
+          _logoutFuture = null;
+        }
+      }
+    }());
+    return logoutFuture;
+  }
+
+  Future<void> _performLogout() async {
     _authGeneration++;
     _isLoggingOut = true;
+    _isLoggingIn = false;
+    _isRestoringSession = false;
     _error = null;
+    _clearSessionState();
     notifyListeners();
 
     final credentialsCleared = await _clearSavedCredentials();
@@ -497,20 +652,11 @@ class AppSessionController extends ChangeNotifier {
     _apiClient.clearWebSession();
     _misClient.clearSession();
 
-    _session = null;
-    _username = null;
-    _password = null;
-    _timelineItems = const [];
-    _courses = const [];
-    _recentCourses = const [];
-    _portalProfile = null;
-    _timetable = null;
-    _portalProfileError = null;
-    _timetableError = null;
-    _isDeadlineReminderEnabled = false;
     _isLoggingOut = false;
     if (!credentialsCleared || !localSessionCleared) {
-      _error = '已退出登录，但部分本地登录数据清理失败；请重启应用后再次退出。';
+      _error = '已退出登录，但部分本地登录数据清理失败；请在错误消失前保持应用打开并再次退出。';
+    } else {
+      _error = null;
     }
     notifyListeners();
   }
@@ -556,21 +702,31 @@ class AppSessionController extends ChangeNotifier {
   Future<T> _withSessionRetry<T>(
     Future<T> Function(AuthSession session) request,
   ) async {
+    final authGeneration = _authGeneration;
     final session = _session;
     if (session == null) {
       throw MoodleApiException('请先登录 iSpace 账号。');
     }
     try {
-      return await request(session);
+      final result = await request(session);
+      if (!_isCurrentAuthOperation(authGeneration)) {
+        throw MoodleApiException('登录状态已变化，请重试。');
+      }
+      return result;
     } on MoodleApiException catch (error) {
-      if (!_looksLikeTokenExpired(error.message)) {
+      if (!_isCurrentAuthOperation(authGeneration) ||
+          !_looksLikeTokenExpired(error.message)) {
         rethrow;
       }
       final refreshed = await _refreshSessionFromSavedCredentials();
-      if (refreshed == null) {
+      if (refreshed == null || !_isCurrentAuthOperation(authGeneration)) {
         rethrow;
       }
-      return request(refreshed);
+      final result = await request(refreshed);
+      if (!_isCurrentAuthOperation(authGeneration)) {
+        throw MoodleApiException('登录状态已变化，请重试。');
+      }
+      return result;
     }
   }
 
@@ -583,6 +739,9 @@ class AppSessionController extends ChangeNotifier {
   }
 
   Future<AuthSession?> _refreshSessionFromSavedCredentials() async {
+    if (_isLoggingOut) {
+      return null;
+    }
     if (_reloginFuture != null) {
       return _reloginFuture!;
     }
@@ -597,7 +756,7 @@ class AppSessionController extends ChangeNotifier {
   Future<AuthSession?> _doRefreshSession() async {
     final authGeneration = _authGeneration;
     final credentials = await _currentCredentials();
-    if (credentials == null || authGeneration != _authGeneration) {
+    if (credentials == null || !_isCurrentAuthOperation(authGeneration)) {
       return null;
     }
     try {
@@ -605,7 +764,7 @@ class AppSessionController extends ChangeNotifier {
         username: credentials.$1,
         password: credentials.$2,
       );
-      if (authGeneration != _authGeneration || _session == null) {
+      if (!_isCurrentAuthOperation(authGeneration) || _session == null) {
         return null;
       }
       _persistSession(
@@ -616,14 +775,27 @@ class AppSessionController extends ChangeNotifier {
       await _saveCredentials(
         username: credentials.$1,
         password: credentials.$2,
+        expectedAuthGeneration: authGeneration,
       );
-      if (authGeneration != _authGeneration) {
+      if (!_isCurrentAuthOperation(authGeneration)) {
         return null;
       }
       notifyListeners();
       return session;
+    } on MoodleAuthenticationException catch (error) {
+      final cleared = await _clearSavedCredentials(
+        expectedAuthGeneration: authGeneration,
+      );
+      if (_isCurrentAuthOperation(authGeneration)) {
+        _authGeneration++;
+        _error = cleared
+            ? error.message
+            : '${error.message}；本地登录信息清理失败，请再次退出登录。';
+        _clearSessionState();
+        notifyListeners();
+      }
+      return null;
     } on MoodleApiException {
-      await _clearSavedCredentials();
       return null;
     } catch (_) {
       return null;
@@ -651,13 +823,22 @@ class AppSessionController extends ChangeNotifier {
   }
 
   Future<(String, String)?> _currentCredentials() async {
+    if (_isLoggingOut) {
+      return null;
+    }
+    final authGeneration = _authGeneration;
     final username = (_username ?? '').trim();
     final password = _password ?? '';
     if (username.isNotEmpty && password.isNotEmpty) {
       return (username, password);
     }
-    final saved = await _loadSavedCredentials();
-    if (saved == null) {
+    final (String, String)? saved;
+    try {
+      saved = await _loadSavedCredentials();
+    } catch (_) {
+      return null;
+    }
+    if (saved == null || authGeneration != _authGeneration || _isLoggingOut) {
       return null;
     }
     _username = saved.$1;
@@ -675,37 +856,77 @@ class AppSessionController extends ChangeNotifier {
     _password = password;
   }
 
-  Future<void> _saveCredentials({
+  void _clearSessionState() {
+    _session = null;
+    _username = null;
+    _password = null;
+    _timelineItems = const [];
+    _courses = const [];
+    _recentCourses = const [];
+    _isLoadingTimeline = false;
+    _isLoadingCourses = false;
+    _isLoadingRecentCourses = false;
+    _isLoadingTimetable = false;
+    _isLoadingPortalProfile = false;
+    _portalProfile = null;
+    _timetable = null;
+    _portalProfileError = null;
+    _timetableError = null;
+    _isDeadlineReminderEnabled = false;
+  }
+
+  bool _isCurrentAuthOperation(int authGeneration) {
+    return authGeneration == _authGeneration && !_isLoggingOut;
+  }
+
+  Future<bool> _saveCredentials({
     required String username,
     required String password,
+    int? expectedAuthGeneration,
   }) async {
     try {
-      await _withCredentialMutation(() {
-        return _credentialStore.save(
+      return await _withCredentialMutation(() async {
+        if (expectedAuthGeneration != null &&
+            expectedAuthGeneration != _authGeneration) {
+          return true;
+        }
+        await _credentialStore.save(
           StoredCredentials(username: username, password: password),
         );
+        return true;
       });
     } catch (_) {
-      // Login can continue when the platform secure store is unavailable.
+      return false;
+    }
+  }
+
+  Future<(String, String)?> _loadSavedCredentialsWithRetry() async {
+    try {
+      return await _loadSavedCredentials();
+    } catch (_) {
+      await Future<void>.delayed(const Duration(milliseconds: 250));
+      return _loadSavedCredentials();
     }
   }
 
   Future<(String, String)?> _loadSavedCredentials() async {
-    try {
-      final credentials = await _credentialStore.load();
-      if (credentials == null) {
-        return null;
-      }
-      return (credentials.username, credentials.password);
-    } catch (_) {
+    final credentials = await _withCredentialMutation(_credentialStore.load);
+    if (credentials == null) {
       return null;
     }
+    return (credentials.username, credentials.password);
   }
 
-  Future<bool> _clearSavedCredentials() async {
+  Future<bool> _clearSavedCredentials({int? expectedAuthGeneration}) async {
     try {
-      await _withCredentialMutation(_credentialStore.clear);
-      return true;
+      return await _withCredentialMutation(() async {
+        if (expectedAuthGeneration != null &&
+            expectedAuthGeneration != _authGeneration) {
+          return true;
+        }
+        await _credentialStore.clear();
+        return true;
+      });
     } catch (_) {
       return false;
     }

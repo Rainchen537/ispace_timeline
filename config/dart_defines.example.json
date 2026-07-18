@@ -1,5 +1,4 @@
 {
-  "APP_ENV": "production",
   "ISPACE_BASE_URL": "https://ispace.uic.edu.cn",
   "ISPACE_COOKIE_DOMAIN": "uic.edu.cn",
   "BNBU_SSO_BASE_URL": "https://sso.bnbu.edu.cn",

@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
@@ -21,7 +22,14 @@ class _MockMailService implements MailService {
   final List<int> restoredUids = [];
   final List<String> downloadedPartIds = [];
   int? savedDraftUid;
+  int draftSaveUidValidity = 777;
+  int? lastSaveExpectedUidValidity;
+  int? lastDeleteExpectedUidValidity;
   MailComposeData? sentData;
+  MailFolder? lastReadFolder;
+  int? lastReadExpectedUidValidity;
+  MailFolder? lastDownloadFolder;
+  int? lastDownloadExpectedUidValidity;
 
   // Override readMessage to return a custom MailMessageDetail
   MailMessageDetail? Function(int uid)? readMessageOverride;
@@ -64,8 +72,17 @@ class _MockMailService implements MailService {
     final total = _fakeTotal ?? allMsgs.length;
     final start = (page - 1) * pageSize;
     final end = (start + pageSize).clamp(0, allMsgs.length);
+    final mailboxUidValidity = 100 + folder.index;
     final pageMsgs = start < allMsgs.length
-        ? allMsgs.sublist(start, end)
+        ? allMsgs
+              .sublist(start, end)
+              .map(
+                (message) => message.copyWith(
+                  folder: folder,
+                  mailboxUidValidity: mailboxUidValidity,
+                ),
+              )
+              .toList(growable: false)
         : <MailMessageSummary>[];
     return MailFolderSnapshot(
       emailAddress: 'test@mail.bnbu.edu.cn',
@@ -77,6 +94,7 @@ class _MockMailService implements MailService {
       totalMessages: total,
       currentPage: page,
       pageSize: pageSize,
+      mailboxUidValidity: mailboxUidValidity,
     );
   }
 
@@ -86,9 +104,15 @@ class _MockMailService implements MailService {
     MailFolder folder = MailFolder.inbox,
     int page = 1,
     int pageSize = 25,
+    int? expectedMailboxUidValidity,
   }) async {
     fetchFolderCallCount++;
     lastFetchedPage = page;
+    final actualUidValidity = 100 + folder.index;
+    if (expectedMailboxUidValidity != null &&
+        expectedMailboxUidValidity != actualUidValidity) {
+      throw const MailServiceException('邮箱内容已更新，请刷新后重试。');
+    }
     final msgs = _listForFolder(folder);
     return _makeSnapshot(folder, msgs, page, pageSize);
   }
@@ -96,8 +120,12 @@ class _MockMailService implements MailService {
   @override
   Future<MailMessageDetail> readMessage({
     required MailAccessCredentials credentials,
+    required MailFolder folder,
     required int uid,
+    int? expectedMailboxUidValidity,
   }) async {
+    lastReadFolder = folder;
+    lastReadExpectedUidValidity = expectedMailboxUidValidity;
     final override = readMessageOverride?.call(uid);
     if (override != null) return override;
     final all = [..._inbox, ..._drafts, ..._trash];
@@ -112,6 +140,8 @@ class _MockMailService implements MailService {
       body: 'Draft body content',
       htmlBody: null,
       isSeen: summary.isSeen,
+      folder: folder,
+      mailboxUidValidity: expectedMailboxUidValidity,
     );
   }
 
@@ -138,21 +168,30 @@ class _MockMailService implements MailService {
   @override
   Future<List<int>> downloadAttachment({
     required MailAccessCredentials credentials,
+    required MailFolder folder,
     required int uid,
     required String partId,
+    int? expectedMailboxUidValidity,
   }) async {
+    lastDownloadFolder = folder;
+    lastDownloadExpectedUidValidity = expectedMailboxUidValidity;
     downloadedPartIds.add(partId);
     return [1, 2, 3];
   }
 
   @override
-  Future<int?> saveDraft({
+  Future<MailDraftIdentity?> saveDraft({
     required MailAccessCredentials credentials,
     required MailComposeData composeData,
     int? existingDraftUid,
+    int? expectedMailboxUidValidity,
   }) async {
+    lastSaveExpectedUidValidity = expectedMailboxUidValidity;
     savedDraftUid = (existingDraftUid ?? 0) + 1;
-    return savedDraftUid;
+    return MailDraftIdentity(
+      uid: savedDraftUid!,
+      mailboxUidValidity: draftSaveUidValidity,
+    );
   }
 
   @override
@@ -160,7 +199,9 @@ class _MockMailService implements MailService {
     required MailAccessCredentials credentials,
     required MailFolder folder,
     required List<int> uids,
+    int? expectedMailboxUidValidity,
   }) async {
+    lastDeleteExpectedUidValidity = expectedMailboxUidValidity;
     deletedUids.addAll(uids);
   }
 
@@ -169,12 +210,113 @@ class _MockMailService implements MailService {
     required MailAccessCredentials credentials,
     required List<int> uids,
     required String userEmailAddress,
+    int? expectedMailboxUidValidity,
   }) async {
     restoredUids.addAll(uids);
   }
 
   @override
   Future<void> close() async {}
+}
+
+class _DelayedFolderMailService extends _MockMailService {
+  _DelayedFolderMailService({super.inbox, super.drafts});
+
+  final Map<MailFolder, Completer<MailFolderSnapshot>> _pending = {};
+
+  @override
+  Future<MailFolderSnapshot> fetchFolder({
+    required MailAccessCredentials credentials,
+    MailFolder folder = MailFolder.inbox,
+    int page = 1,
+    int pageSize = 25,
+    int? expectedMailboxUidValidity,
+  }) {
+    fetchFolderCallCount++;
+    lastFetchedPage = page;
+    final completer = Completer<MailFolderSnapshot>();
+    _pending[folder] = completer;
+    return completer.future;
+  }
+
+  void completeFolder(MailFolder folder) {
+    final completer = _pending.remove(folder);
+    if (completer == null) {
+      throw StateError('No pending request for $folder');
+    }
+    completer.complete(_makeSnapshot(folder, _listForFolder(folder), 1, 25));
+  }
+}
+
+class _DelayedReadMailService extends _MockMailService {
+  _DelayedReadMailService({super.inbox, super.drafts});
+
+  final Completer<MailMessageDetail> _readCompleter =
+      Completer<MailMessageDetail>();
+
+  @override
+  Future<MailMessageDetail> readMessage({
+    required MailAccessCredentials credentials,
+    required MailFolder folder,
+    required int uid,
+    int? expectedMailboxUidValidity,
+  }) {
+    lastReadFolder = folder;
+    lastReadExpectedUidValidity = expectedMailboxUidValidity;
+    return _readCompleter.future;
+  }
+
+  void completeRead(MailMessageDetail detail) {
+    _readCompleter.complete(detail);
+  }
+}
+
+class _DelayedDraftMailService extends _MockMailService {
+  final Completer<MailDraftIdentity?> _saveCompleter =
+      Completer<MailDraftIdentity?>();
+
+  @override
+  Future<MailDraftIdentity?> saveDraft({
+    required MailAccessCredentials credentials,
+    required MailComposeData composeData,
+    int? existingDraftUid,
+    int? expectedMailboxUidValidity,
+  }) {
+    lastSaveExpectedUidValidity = expectedMailboxUidValidity;
+    savedDraftUid = (existingDraftUid ?? 0) + 1;
+    return _saveCompleter.future;
+  }
+
+  void completeSave({required int uid, required int mailboxUidValidity}) {
+    _saveCompleter.complete(
+      MailDraftIdentity(uid: uid, mailboxUidValidity: mailboxUidValidity),
+    );
+  }
+}
+
+class _DelayedSearchMailService extends _MockMailService {
+  _DelayedSearchMailService({super.inbox, super.drafts});
+
+  final Completer<List<MailMessageSummary>> _searchCompleter =
+      Completer<List<MailMessageSummary>>();
+  MailFolder? searchedFolder;
+
+  @override
+  Future<List<MailMessageSummary>> searchFolder({
+    required MailAccessCredentials credentials,
+    required String query,
+    MailFolder folder = MailFolder.inbox,
+    MailSearchScope searchScope = MailSearchScope.allText,
+  }) {
+    lastSearchQuery = query;
+    lastSearchScope = searchScope;
+    searchedFolder = folder;
+    return _searchCompleter.future;
+  }
+
+  void completeSearch(List<MailMessageSummary> messages) {
+    _searchCompleter.complete(messages);
+  }
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -354,6 +496,100 @@ void main() {
         reason: 'Body should be pre-filled',
       );
     });
+
+    testWidgets('auto-saved draft keeps UIDVALIDITY for replacement and send', (
+      tester,
+    ) async {
+      final svc = _MockMailService()..draftSaveUidValidity = 900;
+      final creds = _creds();
+      const draftDetail = MailMessageDetail(
+        uid: 42,
+        subject: 'Draft Subject',
+        sender: 'testuser@mail.bnbu.edu.cn',
+        recipients: 'somebody@example.com',
+        date: null,
+        body: 'Initial body',
+        isSeen: true,
+        folder: MailFolder.drafts,
+        mailboxUidValidity: 500,
+      );
+      await tester.pumpWidget(
+        _wrapInApp(
+          ComposeMailPage(
+            mailService: svc,
+            credentials: creds,
+            draftDetail: draftDetail,
+          ),
+        ),
+      );
+      await tester.enterText(
+        find.byWidgetPredicate(
+          (widget) =>
+              widget is TextField && widget.decoration?.hintText == '写点什么...',
+        ),
+        'Updated body',
+      );
+
+      await tester.pump(const Duration(minutes: 1));
+      await tester.pump();
+
+      expect(svc.lastSaveExpectedUidValidity, 500);
+      expect(svc.savedDraftUid, 43);
+
+      await tester.tap(find.text('发送'));
+      await tester.pump();
+      await tester.pump();
+
+      expect(svc.deletedUids, [43]);
+      expect(svc.lastDeleteExpectedUidValidity, 900);
+    });
+
+    testWidgets('send waits for an in-flight draft save identity', (
+      tester,
+    ) async {
+      final svc = _DelayedDraftMailService();
+      final creds = _creds();
+      const draftDetail = MailMessageDetail(
+        uid: 42,
+        subject: 'Draft Subject',
+        sender: 'testuser@mail.bnbu.edu.cn',
+        recipients: 'somebody@example.com',
+        date: null,
+        body: 'Initial body',
+        isSeen: true,
+        folder: MailFolder.drafts,
+        mailboxUidValidity: 500,
+      );
+      await tester.pumpWidget(
+        _wrapInApp(
+          ComposeMailPage(
+            mailService: svc,
+            credentials: creds,
+            draftDetail: draftDetail,
+          ),
+        ),
+      );
+      await tester.enterText(
+        find.byWidgetPredicate(
+          (widget) =>
+              widget is TextField && widget.decoration?.hintText == '写点什么...',
+        ),
+        'Updated body',
+      );
+      await tester.pump(const Duration(minutes: 1));
+
+      await tester.tap(find.text('发送'));
+      await tester.pump();
+      expect(svc.sentData, isNull);
+
+      svc.completeSave(uid: 43, mailboxUidValidity: 900);
+      await tester.pump();
+      await tester.pump();
+
+      expect(svc.sentData, isNotNull);
+      expect(svc.deletedUids, [43]);
+      expect(svc.lastDeleteExpectedUidValidity, 900);
+    });
   });
 
   // ── Test 3: Draft folder opens compose, not detail ─────────────────────────
@@ -398,6 +634,138 @@ void main() {
         findsOneWidget,
         reason: 'Draft taps SHOULD open compose page',
       );
+    });
+  });
+
+  group('Mailbox request identity', () {
+    testWidgets('stale folder refresh cannot publish under a new folder', (
+      tester,
+    ) async {
+      final svc = _DelayedFolderMailService(
+        inbox: [_makeSummary(uid: 1, subject: 'Stale Inbox Message')],
+        drafts: [_makeSummary(uid: 2, subject: 'Current Draft')],
+      );
+      await tester.pumpWidget(
+        _wrapInApp(
+          MailPage.withService(
+            controller: null,
+            mailService: svc,
+            testCredentials: _creds(),
+          ),
+        ),
+      );
+      await tester.pump();
+
+      tester
+          .widget<PopupMenuButton<MailFolder>>(
+            find.byType(PopupMenuButton<MailFolder>),
+          )
+          .onSelected!(MailFolder.drafts);
+      await tester.pump();
+
+      svc.completeFolder(MailFolder.inbox);
+      await tester.pump();
+      expect(find.text('Stale Inbox Message'), findsNothing);
+      expect(find.text('草稿箱'), findsOneWidget);
+
+      svc.completeFolder(MailFolder.drafts);
+      await tester.pump();
+      expect(find.text('Current Draft'), findsOneWidget);
+      expect(find.text('Stale Inbox Message'), findsNothing);
+    });
+
+    testWidgets('message open keeps the tapped mailbox identity', (
+      tester,
+    ) async {
+      final svc = _DelayedReadMailService(
+        inbox: [_makeSummary(uid: 7, subject: 'Inbox Message')],
+        drafts: [_makeSummary(uid: 8, subject: 'Draft Message')],
+      );
+      await tester.pumpWidget(
+        _wrapInApp(
+          MailPage.withService(
+            controller: null,
+            mailService: svc,
+            testCredentials: _creds(),
+          ),
+        ),
+      );
+      await tester.pump();
+
+      await tester.tap(find.text('Inbox Message'));
+      await tester.pump();
+      tester
+          .widget<PopupMenuButton<MailFolder>>(
+            find.byType(PopupMenuButton<MailFolder>),
+          )
+          .onSelected!(MailFolder.drafts);
+      await tester.pump();
+
+      svc.completeRead(
+        const MailMessageDetail(
+          uid: 7,
+          subject: 'Inbox Message',
+          sender: 'sender@example.com',
+          recipients: 'test@mail.bnbu.edu.cn',
+          cc: null,
+          date: null,
+          body: 'Inbox body',
+          htmlBody: null,
+          isSeen: true,
+          folder: MailFolder.inbox,
+          mailboxUidValidity: 100,
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(svc.lastReadFolder, MailFolder.inbox);
+      expect(svc.lastReadExpectedUidValidity, 100);
+      expect(find.text('邮件详情'), findsOneWidget);
+      expect(find.text('继续编辑'), findsNothing);
+    });
+
+    testWidgets('stale search result cannot publish after folder switch', (
+      tester,
+    ) async {
+      final svc = _DelayedSearchMailService(
+        inbox: [_makeSummary(uid: 1, subject: 'Inbox Message')],
+        drafts: [_makeSummary(uid: 2, subject: 'Draft Message')],
+      );
+      await tester.pumpWidget(
+        _wrapInApp(
+          MailPage.withService(
+            controller: null,
+            mailService: svc,
+            testCredentials: _creds(),
+          ),
+        ),
+      );
+      await tester.pump();
+
+      await tester.enterText(
+        find.byWidgetPredicate(
+          (widget) =>
+              widget is TextField && widget.decoration?.hintText == '搜索',
+        ),
+        'stale',
+      );
+      await tester.pump(const Duration(milliseconds: 600));
+      expect(svc.searchedFolder, MailFolder.inbox);
+
+      tester
+          .widget<PopupMenuButton<MailFolder>>(
+            find.byType(PopupMenuButton<MailFolder>),
+          )
+          .onSelected!(MailFolder.drafts);
+      await tester.pump();
+
+      svc.completeSearch([
+        _makeSummary(uid: 9, subject: 'Stale Search Result'),
+      ]);
+      await tester.pump();
+
+      expect(find.text('Stale Search Result'), findsNothing);
+      expect(find.text('Draft Message'), findsOneWidget);
     });
   });
 

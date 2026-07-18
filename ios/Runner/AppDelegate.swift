@@ -8,7 +8,10 @@ import WebKit
 @objc class AppDelegate: FlutterAppDelegate, UIDocumentInteractionControllerDelegate {
   private let credentialUserDefaultsKeyUser = "ispace.saved_username"
   private let credentialUserDefaultsKeyPass = "ispace.saved_password"
+  private let credentialLogoutTombstoneKey = "ispace.logout_tombstone"
+  private let shareCacheMaxAge: TimeInterval = 24 * 60 * 60
   private var documentInteractionController: UIDocumentInteractionController?
+  private var shareActivityController: UIActivityViewController?
 
   override func application(
     _ application: UIApplication,
@@ -49,7 +52,46 @@ import WebKit
           let defaults = UserDefaults.standard
           defaults.removeObject(forKey: self.credentialUserDefaultsKeyUser)
           defaults.removeObject(forKey: self.credentialUserDefaultsKeyPass)
-          result(true)
+          if defaults.synchronize() {
+            result(true)
+          } else {
+            result(
+              FlutterError(
+                code: "legacy_clear_failed",
+                message: "Unable to durably clear legacy credentials",
+                details: nil
+              )
+            )
+          }
+        case "readLogoutTombstone":
+          result(UserDefaults.standard.bool(forKey: self.credentialLogoutTombstoneKey))
+        case "setLogoutTombstone":
+          guard
+            let arguments = call.arguments as? [String: Any],
+            let blocked = arguments["blocked"] as? Bool
+          else {
+            result(
+              FlutterError(code: "bad_args", message: "Missing logout state", details: nil)
+            )
+            return
+          }
+          let defaults = UserDefaults.standard
+          if blocked {
+            defaults.set(true, forKey: self.credentialLogoutTombstoneKey)
+          } else {
+            defaults.removeObject(forKey: self.credentialLogoutTombstoneKey)
+          }
+          if defaults.synchronize() {
+            result(true)
+          } else {
+            result(
+              FlutterError(
+                code: "logout_tombstone_failed",
+                message: "Unable to durably update logout state",
+                details: nil
+              )
+            )
+          }
         default:
           result(FlutterMethodNotImplemented)
         }
@@ -85,7 +127,8 @@ import WebKit
             from: remoteUrl,
             preferredFileName: preferredName,
             cookieHeader: cookieHeader,
-            cookieOrigin: cookieOrigin
+            cookieOrigin: cookieOrigin,
+            persistent: true
           ) { downloadResult in
             switch downloadResult {
             case .success(let localUrl):
@@ -136,11 +179,16 @@ import WebKit
               from: remoteUrl,
               preferredFileName: preferredName,
               cookieHeader: cookieHeader,
-              cookieOrigin: cookieOrigin
+              cookieOrigin: cookieOrigin,
+              persistent: false
             ) { downloadResult in
               switch downloadResult {
               case .success(let localUrl):
-                self.presentShareSheet(items: [localUrl], result: result)
+                self.presentShareSheet(
+                  items: [localUrl],
+                  cleanupUrl: localUrl.deletingLastPathComponent(),
+                  result: result
+                )
               case .failure(let error):
                 result(
                   FlutterError(
@@ -174,11 +222,16 @@ import WebKit
             from: remoteUrl,
             preferredFileName: preferredName,
             cookieHeader: cookieHeader,
-            cookieOrigin: cookieOrigin
+            cookieOrigin: cookieOrigin,
+            persistent: false
           ) { downloadResult in
             switch downloadResult {
             case .success(let localUrl):
-              self.presentShareSheet(items: [localUrl], result: result)
+              self.presentShareSheet(
+                items: [localUrl],
+                cleanupUrl: localUrl.deletingLastPathComponent(),
+                result: result
+              )
             case .failure(let error):
               result(
                 FlutterError(
@@ -355,22 +408,29 @@ import WebKit
     return root
   }
 
-  private func presentShareSheet(items: [Any], result: @escaping FlutterResult) {
+  private func presentShareSheet(
+    items: [Any],
+    cleanupUrl: URL? = nil,
+    result: @escaping FlutterResult
+  ) {
     DispatchQueue.main.async {
-      let activityVC = UIActivityViewController(
-        activityItems: items,
-        applicationActivities: nil
-      )
-      if let popover = activityVC.popoverPresentationController {
-        popover.sourceView = self.window?.rootViewController?.view
-        popover.sourceRect = CGRect(
-          x: UIScreen.main.bounds.midX,
-          y: UIScreen.main.bounds.midY,
-          width: 0,
-          height: 0
+      guard self.shareActivityController == nil else {
+        if let cleanupUrl {
+          try? FileManager.default.removeItem(at: cleanupUrl)
+        }
+        result(
+          FlutterError(
+            code: "presentation_in_progress",
+            message: "已有分享菜单，请先关闭后重试。",
+            details: nil
+          )
         )
+        return
       }
       guard let presenter = self.topViewController() else {
+        if let cleanupUrl {
+          try? FileManager.default.removeItem(at: cleanupUrl)
+        }
         result(
           FlutterError(
             code: "no_presenter",
@@ -380,8 +440,50 @@ import WebKit
         )
         return
       }
-      presenter.present(activityVC, animated: true)
-      result(true)
+
+      let activityVC = UIActivityViewController(
+        activityItems: items,
+        applicationActivities: nil
+      )
+      self.shareActivityController = activityVC
+      activityVC.completionWithItemsHandler = { _, _, _, _ in
+        DispatchQueue.main.async {
+          if let cleanupUrl {
+            try? FileManager.default.removeItem(at: cleanupUrl)
+          }
+          if self.shareActivityController === activityVC {
+            self.shareActivityController = nil
+          }
+        }
+      }
+      if let popover = activityVC.popoverPresentationController {
+        popover.sourceView = self.window?.rootViewController?.view
+        popover.sourceRect = CGRect(
+          x: UIScreen.main.bounds.midX,
+          y: UIScreen.main.bounds.midY,
+          width: 0,
+          height: 0
+        )
+      }
+      presenter.present(activityVC, animated: true) {
+        guard activityVC.presentingViewController != nil else {
+          if let cleanupUrl {
+            try? FileManager.default.removeItem(at: cleanupUrl)
+          }
+          if self.shareActivityController === activityVC {
+            self.shareActivityController = nil
+          }
+          result(
+            FlutterError(
+              code: "presentation_failed",
+              message: "Unable to present share sheet",
+              details: nil
+            )
+          )
+          return
+        }
+        result(true)
+      }
     }
   }
 
@@ -390,6 +492,7 @@ import WebKit
     preferredFileName: String,
     cookieHeader: String,
     cookieOrigin: String,
+    persistent: Bool,
     completion: @escaping (Result<URL, Error>) -> Void
   ) {
     guard isHttpUrl(remoteUrl) else {
@@ -409,25 +512,42 @@ import WebKit
     let extraCookie = cookieHeader.trimmingCharacters(in: .whitespacesAndNewlines)
     if !extraCookie.isEmpty, urlsHaveSameOrigin(remoteUrl, cookieOrigin) {
       request.setValue(extraCookie, forHTTPHeaderField: "Cookie")
-    } else if
-      let cookies = HTTPCookieStorage.shared.cookies(for: remoteUrl),
-      !cookies.isEmpty
-    {
-      let cookieFields = HTTPCookie.requestHeaderFields(with: cookies)
-      for (key, value) in cookieFields {
-        request.setValue(value, forHTTPHeaderField: key)
-      }
     }
 
     let configuration = URLSessionConfiguration.ephemeral
     configuration.timeoutIntervalForRequest = 30
     configuration.timeoutIntervalForResource = 120
     configuration.httpShouldSetCookies = false
-    let session = URLSession(configuration: configuration)
+    let redirectDelegate = SameOriginCookieRedirectDelegate(
+      cookieHeader: extraCookie,
+      cookieOrigin: URL(string: cookieOrigin),
+      initialUrl: remoteUrl
+    )
+    let session = URLSession(
+      configuration: configuration,
+      delegate: redirectDelegate,
+      delegateQueue: nil
+    )
     session.downloadTask(with: request) { [weak self] tempUrl, response, error in
       defer { session.finishTasksAndInvalidate() }
       if let error {
         completion(.failure(error))
+        return
+      }
+      if let response = response as? HTTPURLResponse,
+        !(200...299).contains(response.statusCode)
+      {
+        completion(
+          .failure(
+            NSError(
+              domain: "ispace.native_actions",
+              code: response.statusCode,
+              userInfo: [
+                NSLocalizedDescriptionKey: "下载失败（HTTP \(response.statusCode)）"
+              ]
+            )
+          )
+        )
         return
       }
       guard let self = self, let tempUrl = tempUrl else {
@@ -446,11 +566,63 @@ import WebKit
       let suggested = response?.suggestedFilename ?? "download.bin"
       let incomingName = preferredFileName.trimmingCharacters(in: .whitespacesAndNewlines)
       let fileName = self.sanitizedFileName(incomingName.isEmpty ? suggested : incomingName)
-      let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
-      let destination = self.uniqueDestinationURL(in: documents, fileName: fileName)
+      if self.isUnexpectedHtmlResponse(response, fileName: fileName) {
+        completion(
+          .failure(
+            NSError(
+              domain: "ispace.native_actions",
+              code: -3,
+              userInfo: [
+                NSLocalizedDescriptionKey: "下载返回了登录页面，而不是请求的文件"
+              ]
+            )
+          )
+        )
+        return
+      }
 
       do {
-        try FileManager.default.moveItem(at: tempUrl, to: destination)
+        let destination: URL
+        if persistent {
+          let documents = FileManager.default.urls(
+            for: .documentDirectory,
+            in: .userDomainMask
+          ).first!
+          destination = try self.movePersistentDownload(
+            at: tempUrl,
+            to: documents,
+            fileName: fileName
+          )
+          var resourceValues = URLResourceValues()
+          resourceValues.isExcludedFromBackup = true
+          var mutableDestination = destination
+          try? mutableDestination.setResourceValues(resourceValues)
+        } else {
+          let cacheRoot = FileManager.default.urls(
+            for: .cachesDirectory,
+            in: .userDomainMask
+          ).first!
+          let shareRoot = cacheRoot.appendingPathComponent(
+            "shared_files",
+            isDirectory: true
+          )
+          self.pruneStaleShareCache(at: shareRoot)
+          let shareDirectory = shareRoot.appendingPathComponent(
+            UUID().uuidString,
+            isDirectory: true
+          )
+          try FileManager.default.createDirectory(
+            at: shareDirectory,
+            withIntermediateDirectories: true
+          )
+          destination = shareDirectory.appendingPathComponent(fileName)
+          do {
+            try FileManager.default.moveItem(at: tempUrl, to: destination)
+          } catch {
+            try? FileManager.default.removeItem(at: shareDirectory)
+            throw error
+          }
+        }
         completion(.success(destination))
       } catch {
         completion(.failure(error))
@@ -486,25 +658,75 @@ import WebKit
     }
   }
 
-  private func uniqueDestinationURL(in directory: URL, fileName: String) -> URL {
+  private func movePersistentDownload(
+    at temporaryUrl: URL,
+    to directory: URL,
+    fileName: String
+  ) throws -> URL {
     let base = (fileName as NSString).deletingPathExtension
     let ext = (fileName as NSString).pathExtension
-    var index = 0
-    while true {
-      let candidateName: String
-      if index == 0 {
-        candidateName = fileName
-      } else if ext.isEmpty {
-        candidateName = "\(base)-\(index)"
-      } else {
-        candidateName = "\(base)-\(index).\(ext)"
+    var destination = directory.appendingPathComponent(fileName)
+
+    for attempt in 0..<10 {
+      do {
+        try FileManager.default.moveItem(at: temporaryUrl, to: destination)
+        return destination
+      } catch {
+        let cocoaError = error as NSError
+        guard cocoaError.domain == NSCocoaErrorDomain,
+          cocoaError.code == CocoaError.Code.fileWriteFileExists.rawValue,
+          attempt < 9
+        else {
+          throw error
+        }
+        let suffix = UUID().uuidString.lowercased()
+        let uniqueName = ext.isEmpty
+          ? "\(base)-\(suffix)"
+          : "\(base)-\(suffix).\(ext)"
+        destination = directory.appendingPathComponent(uniqueName)
       }
-      let candidate = directory.appendingPathComponent(candidateName)
-      if !FileManager.default.fileExists(atPath: candidate.path) {
-        return candidate
-      }
-      index += 1
     }
+    throw NSError(
+      domain: "ispace.native_actions",
+      code: -4,
+      userInfo: [NSLocalizedDescriptionKey: "Unable to allocate a download filename"]
+    )
+  }
+
+  private func pruneStaleShareCache(at root: URL) {
+    guard
+      let entries = try? FileManager.default.contentsOfDirectory(
+        at: root,
+        includingPropertiesForKeys: [.contentModificationDateKey],
+        options: [.skipsHiddenFiles]
+      )
+    else {
+      return
+    }
+    let cutoff = Date().addingTimeInterval(-shareCacheMaxAge)
+    for entry in entries {
+      let modified = try? entry.resourceValues(
+        forKeys: [.contentModificationDateKey]
+      ).contentModificationDate
+      if modified == nil || modified! < cutoff {
+        try? FileManager.default.removeItem(at: entry)
+      }
+    }
+  }
+
+  private func isUnexpectedHtmlResponse(
+    _ response: URLResponse?,
+    fileName: String
+  ) -> Bool {
+    let mimeType = response?.mimeType?.lowercased() ?? ""
+    guard mimeType == "text/html" || mimeType == "application/xhtml+xml" else {
+      return false
+    }
+    if response?.url?.path.lowercased().contains("/login") == true {
+      return true
+    }
+    let ext = (fileName as NSString).pathExtension.lowercased()
+    return !ext.isEmpty && !["html", "htm", "xhtml"].contains(ext)
   }
 
   private func sanitizedFileName(_ raw: String) -> String {
@@ -516,9 +738,43 @@ import WebKit
       .union(.controlCharacters)
     value = value.components(separatedBy: invalid).joined(separator: "_")
     if value.isEmpty || value == "." || value == ".." {
-      return "download.bin"
+      value = "download.bin"
     }
-    return value
+    return truncateFileNameUtf8(value, maxBytes: 200)
+  }
+
+  private func truncateFileNameUtf8(_ fileName: String, maxBytes: Int) -> String {
+    if fileName.lengthOfBytes(using: .utf8) <= maxBytes {
+      return fileName
+    }
+    let path = fileName as NSString
+    let ext = path.pathExtension
+    let base = path.deletingPathExtension
+    let suffix = ext.isEmpty ? "" : ".\(ext)"
+    if suffix.lengthOfBytes(using: .utf8) >= maxBytes {
+      let truncated = truncateUtf8(fileName, maxBytes: maxBytes)
+      return truncated.isEmpty ? "download.bin" : truncated
+    }
+    let truncatedBase = truncateUtf8(
+      base,
+      maxBytes: maxBytes - suffix.lengthOfBytes(using: .utf8)
+    )
+    return (truncatedBase.isEmpty ? "download" : truncatedBase) + suffix
+  }
+
+  private func truncateUtf8(_ value: String, maxBytes: Int) -> String {
+    var output = ""
+    var byteCount = 0
+    for character in value {
+      let characterString = String(character)
+      let characterBytes = characterString.lengthOfBytes(using: .utf8)
+      if byteCount + characterBytes > maxBytes {
+        break
+      }
+      output.append(character)
+      byteCount += characterBytes
+    }
+    return output
   }
 
   private func shouldShareAsFile(_ urlString: String) -> Bool {
@@ -557,6 +813,109 @@ import WebKit
   ) {
     if documentInteractionController === controller {
       documentInteractionController = nil
+    }
+  }
+}
+
+private final class SameOriginCookieRedirectDelegate: NSObject, URLSessionTaskDelegate {
+  private var cookieValues: [String: String]
+  private let cookieOrigin: URL?
+  private let initialScheme: String?
+
+  init(cookieHeader: String, cookieOrigin: URL?, initialUrl: URL) {
+    var values: [String: String] = [:]
+    for part in cookieHeader.split(separator: ";", omittingEmptySubsequences: true) {
+      let pair = part.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false)
+      if pair.count == 2 {
+        let name = pair[0].trimmingCharacters(in: .whitespacesAndNewlines)
+        if !name.isEmpty {
+          values[name] = pair[1].trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+      }
+    }
+    self.cookieValues = values
+    self.cookieOrigin = cookieOrigin
+    self.initialScheme = initialUrl.scheme?.lowercased()
+  }
+
+  func urlSession(
+    _ session: URLSession,
+    task: URLSessionTask,
+    willPerformHTTPRedirection response: HTTPURLResponse,
+    newRequest request: URLRequest,
+    completionHandler: @escaping (URLRequest?) -> Void
+  ) {
+    guard let target = request.url, isHttpUrl(target) else {
+      completionHandler(nil)
+      return
+    }
+    if initialScheme == "https", target.scheme?.lowercased() != "https" {
+      completionHandler(nil)
+      return
+    }
+
+    if let responseUrl = response.url,
+      let cookieOrigin,
+      urlsHaveSameOrigin(responseUrl, cookieOrigin)
+    {
+      var headerFields: [String: String] = [:]
+      for (rawName, rawValue) in response.allHeaderFields {
+        if let name = rawName as? String, let value = rawValue as? String {
+          headerFields[name] = value
+        }
+      }
+      for cookie in HTTPCookie.cookies(
+        withResponseHeaderFields: headerFields,
+        for: responseUrl
+      ) {
+        if cookie.expiresDate.map({ $0 <= Date() }) == true {
+          cookieValues.removeValue(forKey: cookie.name)
+        } else {
+          cookieValues[cookie.name] = cookie.value
+        }
+      }
+    }
+
+    var redirected = request
+    redirected.setValue(nil, forHTTPHeaderField: "Cookie")
+    if !cookieValues.isEmpty,
+      let cookieOrigin,
+      urlsHaveSameOrigin(target, cookieOrigin)
+    {
+      let header = cookieValues
+        .sorted { $0.key < $1.key }
+        .map { "\($0.key)=\($0.value)" }
+        .joined(separator: "; ")
+      redirected.setValue(header, forHTTPHeaderField: "Cookie")
+    }
+    completionHandler(redirected)
+  }
+
+  private func isHttpUrl(_ url: URL) -> Bool {
+    let scheme = url.scheme?.lowercased()
+    return (scheme == "http" || scheme == "https") && url.host?.isEmpty == false
+  }
+
+  private func urlsHaveSameOrigin(_ first: URL, _ second: URL) -> Bool {
+    guard isHttpUrl(first), isHttpUrl(second) else {
+      return false
+    }
+    return first.scheme?.caseInsensitiveCompare(second.scheme ?? "") == .orderedSame
+      && first.host?.caseInsensitiveCompare(second.host ?? "") == .orderedSame
+      && effectivePort(first) == effectivePort(second)
+  }
+
+  private func effectivePort(_ url: URL) -> Int {
+    if let port = url.port {
+      return port
+    }
+    switch url.scheme?.lowercased() {
+    case "http":
+      return 80
+    case "https":
+      return 443
+    default:
+      return -1
     }
   }
 }
@@ -622,7 +981,14 @@ final class IspaceNativeWebView: NSObject, FlutterPlatformView, WKNavigationDele
     let initial = URL(string: initialUrl)
     let baseUrl = URL(string: baseUrlString)
     let cookieStore = webView.configuration.websiteDataStore.httpCookieStore
-    let rawCookies = isMailContent ? [] : (params["cookies"] as? [[String: Any]]) ?? []
+    let rawCookies: [[String: Any]]
+    if isMailContent {
+      rawCookies = []
+    } else {
+      rawCookies = (params["cookies"] as? [Any])?.compactMap {
+        $0 as? [String: Any]
+      } ?? []
+    }
 
     let group = DispatchGroup()
     for raw in rawCookies {

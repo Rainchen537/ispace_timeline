@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:enough_mail/enough_mail.dart';
@@ -11,13 +12,22 @@ import 'mail_service.dart';
 MailService createPlatformMailService() => _IoMailService();
 
 class _IoMailService implements MailService {
-  static const String _incomingServer = AppConfig.mailIncomingServer;
-  static const String _outgoingServer = AppConfig.mailOutgoingServer;
+  static final String _incomingServer = AppConfig.normalizedMailHost(
+    AppConfig.mailIncomingServer,
+    settingName: 'BNBU_MAIL_IMAP_HOST',
+  );
+  static final String _outgoingServer = AppConfig.normalizedMailHost(
+    AppConfig.mailOutgoingServer,
+    settingName: 'BNBU_MAIL_SMTP_HOST',
+  );
   static const int _downloadSizeLimit = 64 * 1024;
 
   MailClient? _client;
   MailAccessCredentials? _activeCredentials;
-  final Map<int, MimeMessage> _messageCache = <int, MimeMessage>{};
+  int _connectionGeneration = 0;
+  Future<void> _operationQueue = Future<void>.value();
+  final Map<(MailFolder, int?, int), MimeMessage> _messageCache =
+      <(MailFolder, int?, int), MimeMessage>{};
 
   @override
   Future<MailFolderSnapshot> fetchFolder({
@@ -25,63 +35,79 @@ class _IoMailService implements MailService {
     MailFolder folder = MailFolder.inbox,
     int page = 1,
     int pageSize = 25,
-  }) async {
-    try {
-      final client = await _ensureConnected(credentials);
-      final folderPath = _mapFolderToPath(folder);
-      final mailFolder = await client.selectMailboxByPath(folderPath);
+    int? expectedMailboxUidValidity,
+  }) {
+    return _serialize(() async {
+      try {
+        final client = await _ensureConnected(credentials);
+        final folderPath = _mapFolderToPath(folder);
+        final mailFolder = await client.selectMailboxByPath(folderPath);
+        final uidValidity = mailFolder.uidValidity;
+        _verifyMailboxIdentity(
+          folder: folder,
+          actualUidValidity: uidValidity,
+          expectedUidValidity: expectedMailboxUidValidity,
+          requireExpected: page > 1,
+        );
+        _discardStaleMailboxCache(folder, uidValidity);
 
-      final totalMessages = mailFolder.messagesExists;
-      if (totalMessages == 0) {
+        final totalMessages = mailFolder.messagesExists;
+        if (totalMessages == 0) {
+          return MailFolderSnapshot(
+            emailAddress: credentials.emailAddress,
+            incomingServer: _incomingServer,
+            outgoingServer: _outgoingServer,
+            messages: const [],
+            fetchedAt: DateTime.now(),
+            folder: folder,
+            totalMessages: 0,
+            currentPage: page,
+            pageSize: pageSize,
+            mailboxUidValidity: uidValidity,
+          );
+        }
+
+        // enough_mail's fetchMessages(count:, page:) handles the last-page
+        // boundary gracefully — it returns fewer messages when fewer exist.
+        final messages = await client.fetchMessages(
+          mailbox: mailFolder,
+          count: pageSize,
+          page: page,
+          fetchPreference: FetchPreference.envelope,
+        );
+
+        final validMessages =
+            messages
+                .where((message) => message.uid != null)
+                .toList(growable: false)
+              ..sort(_sortMessagesDesc);
+
+        _cacheEnvelopeMessages(folder, uidValidity, validMessages);
+
         return MailFolderSnapshot(
           emailAddress: credentials.emailAddress,
           incomingServer: _incomingServer,
           outgoingServer: _outgoingServer,
-          messages: const [],
+          messages: validMessages
+              .map(
+                (message) => _toSummary(
+                  message,
+                  folder: folder,
+                  mailboxUidValidity: uidValidity,
+                ),
+              )
+              .toList(growable: false),
           fetchedAt: DateTime.now(),
           folder: folder,
-          totalMessages: 0,
+          totalMessages: totalMessages,
           currentPage: page,
           pageSize: pageSize,
+          mailboxUidValidity: uidValidity,
         );
+      } catch (error) {
+        throw _mapError(error);
       }
-
-      // enough_mail's fetchMessages(count:, page:) handles the last-page
-      // boundary gracefully — it returns fewer messages when fewer exist.
-      final messages = await client.fetchMessages(
-        count: pageSize,
-        page: page,
-        fetchPreference: FetchPreference.envelope,
-      );
-
-      final validMessages =
-          messages
-              .where((message) => message.uid != null)
-              .toList(growable: false)
-            ..sort(_sortMessagesDesc);
-
-      // Update cache
-      if (page == 1) {
-        _messageCache.clear();
-      }
-      _messageCache.addEntries(
-        validMessages.map((message) => MapEntry(message.uid!, message)),
-      );
-
-      return MailFolderSnapshot(
-        emailAddress: credentials.emailAddress,
-        incomingServer: _incomingServer,
-        outgoingServer: _outgoingServer,
-        messages: validMessages.map(_toSummary).toList(growable: false),
-        fetchedAt: DateTime.now(),
-        folder: folder,
-        totalMessages: totalMessages,
-        currentPage: page,
-        pageSize: pageSize,
-      );
-    } catch (error) {
-      throw _mapError(error);
-    }
+    });
   }
 
   @override
@@ -90,50 +116,74 @@ class _IoMailService implements MailService {
     required String query,
     MailFolder folder = MailFolder.inbox,
     MailSearchScope searchScope = MailSearchScope.allText,
-  }) async {
+  }) {
     final lowerQuery = query.trim().toLowerCase();
-    if (lowerQuery.isEmpty) return [];
-    try {
-      final client = await _ensureConnected(credentials);
-      final folderPath = _mapFolderToPath(folder);
-      final mailbox = await client.selectMailboxByPath(folderPath);
+    if (lowerQuery.isEmpty) return Future.value(const []);
+    return _serialize(() async {
+      try {
+        final client = await _ensureConnected(credentials);
+        final folderPath = _mapFolderToPath(folder);
+        final mailbox = await client.selectMailboxByPath(folderPath);
+        final uidValidity = mailbox.uidValidity;
+        _discardStaleMailboxCache(folder, uidValidity);
 
-      final total = mailbox.messagesExists;
-      if (total == 0) return [];
+        final total = mailbox.messagesExists;
+        if (total == 0) return const <MailMessageSummary>[];
 
-      // Fetch all messages with envelope (from/subject/date/flags only)
-      // for fast client-side filtering, since QQ exmail does not support
-      // IMAP SEARCH criteria properly.
-      final messages = await client.fetchMessages(
-        count: total,
-        fetchPreference: FetchPreference.envelope,
-      );
+        // Fetch all messages with envelope (from/subject/date/flags only)
+        // for fast client-side filtering, since QQ exmail does not support
+        // IMAP SEARCH criteria properly.
+        final messages = await client.fetchMessages(
+          mailbox: mailbox,
+          count: total,
+          fetchPreference: FetchPreference.envelope,
+        );
+        final validMessages = messages
+            .where((message) => message.uid != null)
+            .toList(growable: false);
+        _cacheEnvelopeMessages(folder, uidValidity, validMessages);
 
-      final summaries =
-          messages
-              .where((m) => m.uid != null)
-              .where((m) => _messageMatchesSearch(m, lowerQuery, searchScope))
-              .map(_toSummary)
-              .toList(growable: false)
-            ..sort(_sortSummariesDesc);
+        final summaries =
+            validMessages
+                .where(
+                  (message) => _messageMatchesSearch(
+                    message,
+                    lowerQuery,
+                    searchScope,
+                    folder,
+                    uidValidity,
+                  ),
+                )
+                .map(
+                  (message) => _toSummary(
+                    message,
+                    folder: folder,
+                    mailboxUidValidity: uidValidity,
+                  ),
+                )
+                .toList(growable: false)
+              ..sort(_sortSummariesDesc);
 
-      return summaries;
-    } catch (error) {
-      throw _mapError(error);
-    }
+        return summaries;
+      } catch (error) {
+        throw _mapError(error);
+      }
+    });
   }
 
   bool _messageMatchesSearch(
     MimeMessage message,
     String lowerQuery,
     MailSearchScope scope,
+    MailFolder folder,
+    int? mailboxUidValidity,
   ) {
     switch (scope) {
       case MailSearchScope.allText:
         return _subjectContains(message, lowerQuery) ||
             _fromContains(message, lowerQuery) ||
             _toContains(message, lowerQuery) ||
-            _bodyContains(message, lowerQuery);
+            _bodyContains(message, lowerQuery, folder, mailboxUidValidity);
       case MailSearchScope.subject:
         return _subjectContains(message, lowerQuery);
       case MailSearchScope.from:
@@ -162,11 +212,16 @@ class _IoMailService implements MailService {
     );
   }
 
-  bool _bodyContains(MimeMessage message, String query) {
-    // Body is only available for fully-fetched cached messages
+  bool _bodyContains(
+    MimeMessage message,
+    String query,
+    MailFolder folder,
+    int? mailboxUidValidity,
+  ) {
+    // Body is only available for fully-fetched cached messages.
     final uid = message.uid;
     if (uid == null) return false;
-    final cached = _messageCache[uid];
+    final cached = _messageCache[(folder, mailboxUidValidity, uid)];
     if (cached == null) return false;
     final plain = cached.decodeTextPlainPart()?.toLowerCase() ?? '';
     return plain.contains(query);
@@ -175,108 +230,139 @@ class _IoMailService implements MailService {
   @override
   Future<MailMessageDetail> readMessage({
     required MailAccessCredentials credentials,
+    required MailFolder folder,
     required int uid,
-  }) async {
-    try {
-      final client = await _ensureConnected(credentials);
-      // Ensure folder is selected (default to Inbox if not cached)
-      var message = _messageCache[uid];
-      if (message == null) {
-        await fetchFolder(credentials: credentials);
-        message = _messageCache[uid];
-      }
-      if (message == null) {
-        throw const MailServiceException('未找到这封邮件，请先刷新后重试。');
-      }
+    int? expectedMailboxUidValidity,
+  }) {
+    return _serialize(() async {
+      try {
+        final client = await _ensureConnected(credentials);
+        final mailbox = await client.selectMailboxByPath(
+          _mapFolderToPath(folder),
+        );
+        final uidValidity = mailbox.uidValidity;
+        _verifyMailboxIdentity(
+          folder: folder,
+          actualUidValidity: uidValidity,
+          expectedUidValidity: expectedMailboxUidValidity,
+          requireExpected: true,
+        );
+        _discardStaleMailboxCache(folder, uidValidity);
 
-      final loadedMessage = await client.fetchMessageContents(
-        message,
-        markAsSeen: true,
-        includedInlineTypes: const [MediaToptype.text, MediaToptype.image],
-      );
-      loadedMessage.isSeen = true;
-      _messageCache[uid] = loadedMessage;
-      return _toDetail(loadedMessage);
-    } catch (error) {
-      throw _mapError(error);
-    }
+        final message = await _loadMessageEnvelope(
+          client: client,
+          mailbox: mailbox,
+          folder: folder,
+          mailboxUidValidity: uidValidity,
+          uid: uid,
+        );
+        final loadedMessage = await client.fetchMessageContents(
+          message,
+          markAsSeen: true,
+          includedInlineTypes: const [MediaToptype.text, MediaToptype.image],
+        );
+        loadedMessage.isSeen = true;
+        _messageCache[(folder, uidValidity, uid)] = loadedMessage;
+        return _toDetail(
+          loadedMessage,
+          folder: folder,
+          mailboxUidValidity: uidValidity,
+        );
+      } catch (error) {
+        throw _mapError(error);
+      }
+    });
   }
 
   @override
   Future<List<int>> downloadAttachment({
     required MailAccessCredentials credentials,
+    required MailFolder folder,
     required int uid,
     required String partId,
-  }) async {
-    try {
-      final client = await _ensureConnected(credentials);
-      var message = _messageCache[uid];
-      if (message == null) {
-        await fetchFolder(credentials: credentials);
-        message = _messageCache[uid];
-      }
-      if (message == null) {
-        throw const MailServiceException('未找到这封邮件，请先刷新后重试。');
-      }
+    int? expectedMailboxUidValidity,
+  }) {
+    return _serialize(() async {
+      try {
+        final index = int.tryParse(partId);
+        if (index == null || index < 0) {
+          throw const MailServiceException('附件参数错误。');
+        }
 
-      final index = int.tryParse(partId);
-      if (index == null || index < 0) {
-        throw const MailServiceException('附件参数错误。');
+        final client = await _ensureConnected(credentials);
+        final mailbox = await client.selectMailboxByPath(
+          _mapFolderToPath(folder),
+        );
+        final uidValidity = mailbox.uidValidity;
+        _verifyMailboxIdentity(
+          folder: folder,
+          actualUidValidity: uidValidity,
+          expectedUidValidity: expectedMailboxUidValidity,
+          requireExpected: true,
+        );
+        _discardStaleMailboxCache(folder, uidValidity);
+
+        final message = await _loadMessageEnvelope(
+          client: client,
+          mailbox: mailbox,
+          folder: folder,
+          mailboxUidValidity: uidValidity,
+          uid: uid,
+        );
+        final loadedMessage = await client.fetchMessageContents(message);
+        _messageCache[(folder, uidValidity, uid)] = loadedMessage;
+
+        final allParts = loadedMessage.allPartsFlat;
+        if (index >= allParts.length) {
+          throw const MailServiceException('未找到该附件。');
+        }
+        return allParts[index].decodeContentBinary() ?? const [];
+      } catch (error) {
+        throw _mapError(error);
       }
-
-      final allParts = message.allPartsFlat;
-      if (index >= allParts.length) {
-        throw const MailServiceException('未找到该附件。');
-      }
-
-      final part = allParts[index];
-      // Force fetch full content if not already available
-      await client.fetchMessageContents(message);
-
-      return part.decodeContentBinary() ?? const [];
-    } catch (error) {
-      throw _mapError(error);
-    }
+    });
   }
 
   @override
   Future<void> sendEmail({
     required MailAccessCredentials credentials,
     required MailComposeData composeData,
-  }) async {
-    try {
-      final client = await _ensureConnected(credentials);
+  }) {
+    return _serialize(() async {
+      try {
+        final client = await _ensureConnected(credentials);
 
-      final MessageBuilder builder;
-      if (composeData.htmlBody != null) {
-        builder = MessageBuilder.prepareMultipartAlternativeMessage(
-          plainText: composeData.body,
-          htmlText: composeData.htmlBody!,
-        );
-      } else {
-        builder = MessageBuilder.prepareMultipartMixedMessage();
-        builder.addTextPlain(composeData.body);
-      }
+        final MessageBuilder builder;
+        if (composeData.htmlBody != null) {
+          builder = MessageBuilder.prepareMultipartAlternativeMessage(
+            plainText: composeData.body,
+            htmlText: composeData.htmlBody!,
+          );
+        } else {
+          builder = MessageBuilder.prepareMultipartMixedMessage();
+          builder.addTextPlain(composeData.body);
+        }
 
-      builder.from = [MailAddress(null, credentials.emailAddress)];
-      builder.to = [MailAddress(null, composeData.to)];
-      if (composeData.cc != null && composeData.cc!.isNotEmpty) {
-        builder.cc = [MailAddress(null, composeData.cc!)];
-      }
-      builder.subject = composeData.subject;
+        builder.from = [MailAddress(null, credentials.emailAddress)];
+        builder.to = [MailAddress(null, composeData.to)];
+        if (composeData.cc != null && composeData.cc!.isNotEmpty) {
+          builder.cc = [MailAddress(null, composeData.cc!)];
+        }
+        builder.subject = composeData.subject;
 
-      if (composeData.inReplyTo != null) {
-        builder.addHeader('In-Reply-To', composeData.inReplyTo!);
-      }
-      if (composeData.references != null) {
-        builder.addHeader('References', composeData.references!);
-      }
+        if (composeData.inReplyTo != null) {
+          builder.addHeader('In-Reply-To', composeData.inReplyTo!);
+        }
+        if (composeData.references != null) {
+          builder.addHeader('References', composeData.references!);
+        }
 
-      final mimeMessage = builder.buildMimeMessage();
-      await client.sendMessage(mimeMessage);
-    } catch (error) {
-      throw _mapError(error);
-    }
+        final mimeMessage = builder.buildMimeMessage();
+        await client.sendMessage(mimeMessage);
+      } catch (error) {
+        throw _mapError(error);
+      }
+    });
   }
 
   @override
@@ -284,77 +370,102 @@ class _IoMailService implements MailService {
     required MailAccessCredentials credentials,
     required MailFolder folder,
     required List<int> uids,
-  }) async {
-    if (uids.isEmpty) return;
-    try {
-      final client = await _ensureConnected(credentials);
-      if (client.mailboxes == null) {
-        await client.listMailboxes();
-      }
-      await client.selectMailboxByPath(_mapFolderToPath(folder));
-      final sequence = MessageSequence.fromIds(uids, isUid: true);
-
-      // Try the standard path: enough_mail will attempt UID MOVE (or UID COPY+\Deleted).
-      bool moved = false;
+    int? expectedMailboxUidValidity,
+  }) {
+    if (uids.isEmpty) return Future.value();
+    return _serialize(() async {
       try {
-        await client.deleteMessages(sequence, expunge: false);
-        moved = true;
-      } on MailException {
-        // QQ exmail returns "100001 Mails not exist!" for UID MOVE even when
-        // the message exists.  Fall through to the manual UID-based fallback.
-      }
+        final client = await _ensureConnected(credentials);
+        if (client.mailboxes == null) {
+          await client.listMailboxes();
+        }
+        final mailbox = await client.selectMailboxByPath(
+          _mapFolderToPath(folder),
+        );
+        final uidValidity = mailbox.uidValidity;
+        _verifyMailboxIdentity(
+          folder: folder,
+          actualUidValidity: uidValidity,
+          expectedUidValidity: expectedMailboxUidValidity,
+          requireExpected: true,
+        );
+        final sequence = MessageSequence.fromIds(uids, isUid: true);
 
-      if (!moved) {
-        // Fallback: UID COPY to trash + UID STORE \Deleted + EXPUNGE.
-        // We access the low-level ImapClient because MailClient.deleteMessages
-        // with expunge:true incorrectly calls STORE (sequence-number-based)
-        // instead of UID STORE for UID sequences.
-        final imapClient = client.lowLevelIncomingMailClient as ImapClient;
-
-        if (folder != MailFolder.trash) {
-          // Best-effort copy to trash so the message appears in Deleted Messages.
-          try {
-            await imapClient.uidCopy(
-              sequence,
-              targetMailboxPath: _mapFolderToPath(MailFolder.trash),
-            );
-          } catch (_) {
-            // If copy to trash fails, skip it and proceed to permanent delete.
-          }
+        // Try the standard path: enough_mail will attempt UID MOVE (or UID COPY+\Deleted).
+        bool moved = false;
+        try {
+          await client.deleteMessages(sequence, expunge: false);
+          moved = true;
+        } on MailException {
+          // QQ exmail returns "100001 Mails not exist!" for UID MOVE even when
+          // the message exists. Fall through to the manual UID-based fallback.
         }
 
-        // Mark as \Deleted using UID STORE (correct UID-based command).
-        await imapClient.uidStore(
-          sequence,
-          [MessageFlags.deleted],
-          action: StoreAction.add,
-          silent: true,
-        );
-        // EXPUNGE removes all \Deleted messages from the selected mailbox.
-        await imapClient.expunge();
-      }
+        if (!moved) {
+          // Fallback: UID COPY to trash + UID STORE \Deleted + EXPUNGE.
+          // We access the low-level ImapClient because MailClient.deleteMessages
+          // with expunge:true incorrectly calls STORE (sequence-number-based)
+          // instead of UID STORE for UID sequences.
+          final imapClient = client.lowLevelIncomingMailClient as ImapClient;
 
-      for (final uid in uids) {
-        _messageCache.remove(uid);
+          if (folder != MailFolder.trash) {
+            // Best-effort copy to trash so the message appears in Deleted Messages.
+            try {
+              await imapClient.uidCopy(
+                sequence,
+                targetMailboxPath: _mapFolderToPath(MailFolder.trash),
+              );
+            } catch (_) {
+              // If copy to trash fails, skip it and proceed to permanent delete.
+            }
+          }
+
+          // Mark as \Deleted using UID STORE (correct UID-based command).
+          await imapClient.uidStore(
+            sequence,
+            [MessageFlags.deleted],
+            action: StoreAction.add,
+            silent: true,
+          );
+          // EXPUNGE removes all \Deleted messages from the selected mailbox.
+          await imapClient.expunge();
+        }
+
+        for (final uid in uids) {
+          _messageCache.remove((folder, uidValidity, uid));
+        }
+      } catch (error) {
+        throw _mapError(error);
       }
-    } catch (error) {
-      throw _mapError(error);
-    }
+    });
   }
 
   @override
-  Future<int?> saveDraft({
+  Future<MailDraftIdentity?> saveDraft({
     required MailAccessCredentials credentials,
     required MailComposeData composeData,
     int? existingDraftUid,
-  }) async {
-    try {
-      final client = await _ensureConnected(credentials);
+    int? expectedMailboxUidValidity,
+  }) {
+    return _serialize(() async {
+      try {
+        final client = await _ensureConnected(credentials);
+        final draftsMailbox = await client.selectMailboxByPath(
+          _mapFolderToPath(MailFolder.drafts),
+        );
+        final draftsUidValidity = draftsMailbox.uidValidity;
+        _discardStaleMailboxCache(MailFolder.drafts, draftsUidValidity);
 
-      // Delete old draft if exists.
-      if (existingDraftUid != null) {
-        try {
-          await client.selectMailboxByPath(_mapFolderToPath(MailFolder.drafts));
+        // A UID is only meaningful within the exact Drafts UIDVALIDITY epoch.
+        if (existingDraftUid != null) {
+          if (expectedMailboxUidValidity == null || draftsUidValidity == null) {
+            throw const MailServiceException('草稿箱身份不可用，请刷新草稿箱后重试。');
+          }
+          _verifyMailboxIdentity(
+            folder: MailFolder.drafts,
+            actualUidValidity: draftsUidValidity,
+            expectedUidValidity: expectedMailboxUidValidity,
+          );
           final draftSeq = MessageSequence.fromIds([
             existingDraftUid,
           ], isUid: true);
@@ -368,53 +479,58 @@ class _IoMailService implements MailService {
             silent: true,
           );
           await imapClient.expunge();
-          _messageCache.remove(existingDraftUid);
-        } catch (_) {
-          // best-effort
+          _messageCache.remove((
+            MailFolder.drafts,
+            draftsUidValidity,
+            existingDraftUid,
+          ));
         }
-      }
 
-      // Build message
-      final builder = MessageBuilder.prepareMultipartMixedMessage();
-      builder.from = [MailAddress(null, credentials.emailAddress)];
-      if (composeData.to.isNotEmpty) {
-        builder.to = [MailAddress(null, composeData.to)];
-      }
-      if (composeData.cc != null && composeData.cc!.isNotEmpty) {
-        builder.cc = [MailAddress(null, composeData.cc!)];
-      }
-      builder.subject = composeData.subject;
-      builder.addTextPlain(composeData.body);
-      if (composeData.inReplyTo != null) {
-        builder.addHeader('In-Reply-To', composeData.inReplyTo!);
-      }
-      if (composeData.references != null) {
-        builder.addHeader('References', composeData.references!);
-      }
-      final mimeMessage = builder.buildMimeMessage();
+        // Build message
+        final builder = MessageBuilder.prepareMultipartMixedMessage();
+        builder.from = [MailAddress(null, credentials.emailAddress)];
+        if (composeData.to.isNotEmpty) {
+          builder.to = [MailAddress(null, composeData.to)];
+        }
+        if (composeData.cc != null && composeData.cc!.isNotEmpty) {
+          builder.cc = [MailAddress(null, composeData.cc!)];
+        }
+        builder.subject = composeData.subject;
+        builder.addTextPlain(composeData.body);
+        if (composeData.inReplyTo != null) {
+          builder.addHeader('In-Reply-To', composeData.inReplyTo!);
+        }
+        if (composeData.references != null) {
+          builder.addHeader('References', composeData.references!);
+        }
+        final mimeMessage = builder.buildMimeMessage();
 
-      // Append to Drafts
-      UidResponseCode? uidResponse;
-      try {
-        uidResponse = await client.appendMessageToFlag(
-          mimeMessage,
-          MailboxFlag.drafts,
-          flags: [MessageFlags.draft, MessageFlags.seen],
+        // Append to Drafts. APPENDUID supplies the authoritative mailbox epoch.
+        UidResponseCode? uidResponse;
+        try {
+          uidResponse = await client.appendMessageToFlag(
+            mimeMessage,
+            MailboxFlag.drafts,
+            flags: [MessageFlags.draft, MessageFlags.seen],
+          );
+        } catch (_) {
+          uidResponse = await client.appendMessage(
+            mimeMessage,
+            draftsMailbox,
+            flags: [MessageFlags.draft, MessageFlags.seen],
+          );
+        }
+
+        final newUid = uidResponse?.targetSequence.toList(null).firstOrNull;
+        if (uidResponse == null || newUid == null) return null;
+        return MailDraftIdentity(
+          uid: newUid,
+          mailboxUidValidity: uidResponse.uidValidity,
         );
-      } catch (_) {
-        // Fallback: select Drafts by path and append
-        final draftsMailbox = await client.selectMailboxByPath('Drafts');
-        uidResponse = await client.appendMessage(
-          mimeMessage,
-          draftsMailbox,
-          flags: [MessageFlags.draft, MessageFlags.seen],
-        );
+      } catch (error) {
+        throw _mapError(error);
       }
-
-      return uidResponse?.targetSequence.toList(null).firstOrNull;
-    } catch (error) {
-      throw _mapError(error);
-    }
+    });
   }
 
   @override
@@ -422,69 +538,81 @@ class _IoMailService implements MailService {
     required MailAccessCredentials credentials,
     required List<int> uids,
     required String userEmailAddress,
-  }) async {
-    if (uids.isEmpty) return;
-    try {
-      final client = await _ensureConnected(credentials);
-      final imapClient = client.lowLevelIncomingMailClient as ImapClient;
-
-      // Select trash so subsequent IMAP commands operate on it.
-      await client.selectMailboxByPath(_mapFolderToPath(MailFolder.trash));
-      final sequence = MessageSequence.fromIds(uids, isUid: true);
-
-      // Fetch FLAGS + FROM for each UID to determine the restore target folder.
-      final fetchResult = await imapClient.uidFetchMessages(
-        sequence,
-        '(FLAGS FROM)',
-      );
-
-      // Group UIDs by their inferred restore target folder.
-      final Map<String, List<int>> byFolder = {};
-      final Set<int> foundUids = {};
-      for (final msg in fetchResult.messages) {
-        final uid = msg.uid;
-        if (uid == null) continue;
-        foundUids.add(uid);
-        final targetPath = _inferRestoreFolder(msg, userEmailAddress);
-        byFolder.putIfAbsent(targetPath, () => []).add(uid);
-      }
-
-      // Any UIDs not returned by the server fall back to INBOX.
-      for (final uid in uids) {
-        if (!foundUids.contains(uid)) {
-          byFolder.putIfAbsent('INBOX', () => []).add(uid);
-        }
-      }
-
-      // UID COPY each group to its target folder.
-      for (final entry in byFolder.entries) {
-        if (entry.value.isEmpty) continue;
-        final groupSeq = MessageSequence.fromIds(entry.value, isUid: true);
-        await imapClient.uidCopy(groupSeq, targetMailboxPath: entry.key);
-      }
-
-      // Mark all restored messages as \Deleted in trash, then expunge only
-      // those UIDs (UID EXPUNGE via UIDPLUS extension) so we don't accidentally
-      // purge other messages that happen to carry \Deleted already.
-      await imapClient.uidStore(
-        sequence,
-        [MessageFlags.deleted],
-        action: StoreAction.add,
-        silent: true,
-      );
+    int? expectedMailboxUidValidity,
+  }) {
+    if (uids.isEmpty) return Future.value();
+    return _serialize(() async {
       try {
-        await imapClient.uidExpunge(sequence);
-      } catch (_) {
-        // If the server doesn't support UIDPLUS, fall back to plain EXPUNGE.
-        await imapClient.expunge();
-      }
+        final client = await _ensureConnected(credentials);
+        final imapClient = client.lowLevelIncomingMailClient as ImapClient;
 
-      for (final uid in uids) {
-        _messageCache.remove(uid);
+        // Select trash so subsequent IMAP commands operate on it.
+        final mailbox = await client.selectMailboxByPath(
+          _mapFolderToPath(MailFolder.trash),
+        );
+        final uidValidity = mailbox.uidValidity;
+        _verifyMailboxIdentity(
+          folder: MailFolder.trash,
+          actualUidValidity: uidValidity,
+          expectedUidValidity: expectedMailboxUidValidity,
+          requireExpected: true,
+        );
+        final sequence = MessageSequence.fromIds(uids, isUid: true);
+
+        // Fetch FLAGS + FROM for each UID to determine the restore target folder.
+        final fetchResult = await imapClient.uidFetchMessages(
+          sequence,
+          '(UID FLAGS ENVELOPE)',
+        );
+
+        // Group UIDs by their inferred restore target folder.
+        final Map<String, List<int>> byFolder = {};
+        final Set<int> foundUids = {};
+        for (final msg in fetchResult.messages) {
+          final uid = msg.uid;
+          if (uid == null) continue;
+          foundUids.add(uid);
+          final targetPath = _inferRestoreFolder(msg, userEmailAddress);
+          byFolder.putIfAbsent(targetPath, () => []).add(uid);
+        }
+
+        // Any UIDs not returned by the server fall back to INBOX.
+        for (final uid in uids) {
+          if (!foundUids.contains(uid)) {
+            byFolder.putIfAbsent('INBOX', () => []).add(uid);
+          }
+        }
+
+        // UID COPY each group to its target folder.
+        for (final entry in byFolder.entries) {
+          if (entry.value.isEmpty) continue;
+          final groupSeq = MessageSequence.fromIds(entry.value, isUid: true);
+          await imapClient.uidCopy(groupSeq, targetMailboxPath: entry.key);
+        }
+
+        // Mark all restored messages as \Deleted in trash, then expunge only
+        // those UIDs (UID EXPUNGE via UIDPLUS extension) so we don't accidentally
+        // purge other messages that happen to carry \Deleted already.
+        await imapClient.uidStore(
+          sequence,
+          [MessageFlags.deleted],
+          action: StoreAction.add,
+          silent: true,
+        );
+        try {
+          await imapClient.uidExpunge(sequence);
+        } catch (_) {
+          // If the server doesn't support UIDPLUS, fall back to plain EXPUNGE.
+          await imapClient.expunge();
+        }
+
+        for (final uid in uids) {
+          _messageCache.remove((MailFolder.trash, uidValidity, uid));
+        }
+      } catch (error) {
+        throw _mapError(error);
       }
-    } catch (error) {
-      throw _mapError(error);
-    }
+    });
   }
 
   /// Infers the folder a trash message originally came from.
@@ -509,8 +637,81 @@ class _IoMailService implements MailService {
     return 'INBOX';
   }
 
+  Future<T> _serialize<T>(Future<T> Function() operation) {
+    final result = _operationQueue.then((_) => operation());
+    _operationQueue = result.then<void>(
+      (_) {},
+      onError: (Object _, StackTrace __) {},
+    );
+    return result;
+  }
+
+  void _verifyMailboxIdentity({
+    required MailFolder folder,
+    required int? actualUidValidity,
+    required int? expectedUidValidity,
+    bool requireExpected = false,
+  }) {
+    if (expectedUidValidity == null) {
+      if (!requireExpected) return;
+      throw MailServiceException('${_folderDisplayName(folder)}身份不可用，请刷新后重试。');
+    }
+    if (actualUidValidity == expectedUidValidity) return;
+    throw MailServiceException('${_folderDisplayName(folder)}已更新，请刷新后重试。');
+  }
+
+  void _discardStaleMailboxCache(MailFolder folder, int? mailboxUidValidity) {
+    _messageCache.removeWhere(
+      (key, _) => key.$1 == folder && key.$2 != mailboxUidValidity,
+    );
+  }
+
+  void _cacheEnvelopeMessages(
+    MailFolder folder,
+    int? mailboxUidValidity,
+    Iterable<MimeMessage> messages,
+  ) {
+    for (final message in messages) {
+      final uid = message.uid;
+      if (uid == null) continue;
+      _messageCache.putIfAbsent((
+        folder,
+        mailboxUidValidity,
+        uid,
+      ), () => message);
+    }
+  }
+
+  Future<MimeMessage> _loadMessageEnvelope({
+    required MailClient client,
+    required Mailbox mailbox,
+    required MailFolder folder,
+    required int? mailboxUidValidity,
+    required int uid,
+  }) async {
+    final key = (folder, mailboxUidValidity, uid);
+    final cached = _messageCache[key];
+    if (cached != null) return cached;
+
+    final messages = await client.fetchMessageSequence(
+      MessageSequence.fromIds([uid], isUid: true),
+      mailbox: mailbox,
+      fetchPreference: FetchPreference.envelope,
+    );
+    for (final message in messages) {
+      if (message.uid == uid) {
+        _messageCache[key] = message;
+        return message;
+      }
+    }
+    throw const MailServiceException('未找到这封邮件，请先刷新后重试。');
+  }
+
   @override
-  Future<void> close() async {
+  Future<void> close() => _serialize(_closeConnection);
+
+  Future<void> _closeConnection() async {
+    _connectionGeneration++;
     _messageCache.clear();
     _activeCredentials = null;
     final client = _client;
@@ -535,7 +736,8 @@ class _IoMailService implements MailService {
       return client;
     }
 
-    await close();
+    await _closeConnection();
+    final connectionGeneration = ++_connectionGeneration;
     final nextClient = MailClient(
       MailAccount.fromManualSettings(
         name: 'BNBU Mail',
@@ -548,10 +750,43 @@ class _IoMailService implements MailService {
       ),
       downloadSizeLimit: _downloadSizeLimit,
     );
-    await nextClient.connect(timeout: const Duration(seconds: 20));
-    _client = nextClient;
-    _activeCredentials = credentials;
-    return nextClient;
+    try {
+      await nextClient.connect(timeout: const Duration(seconds: 20));
+      if (connectionGeneration != _connectionGeneration) {
+        try {
+          await nextClient.disconnect();
+        } catch (_) {
+          // Ignore teardown failures for a superseded connection.
+        }
+        throw const MailServiceException('邮箱连接已关闭，请重试。');
+      }
+      _client = nextClient;
+      _activeCredentials = credentials;
+      return nextClient;
+    } catch (_) {
+      try {
+        await nextClient.disconnect();
+      } catch (_) {
+        // Ignore cleanup failures for an incomplete connection.
+      }
+      if (connectionGeneration == _connectionGeneration) {
+        _activeCredentials = null;
+      }
+      rethrow;
+    }
+  }
+
+  String _folderDisplayName(MailFolder folder) {
+    switch (folder) {
+      case MailFolder.inbox:
+        return '收件箱';
+      case MailFolder.sent:
+        return '已发送';
+      case MailFolder.drafts:
+        return '草稿箱';
+      case MailFolder.trash:
+        return '已删除';
+    }
   }
 
   String _mapFolderToPath(MailFolder folder) {
@@ -567,7 +802,11 @@ class _IoMailService implements MailService {
     }
   }
 
-  MailMessageSummary _toSummary(MimeMessage message) {
+  MailMessageSummary _toSummary(
+    MimeMessage message, {
+    required MailFolder folder,
+    required int? mailboxUidValidity,
+  }) {
     final plainText = _extractPlainText(message);
     final htmlBody = _extractHtmlSource(message);
     return MailMessageSummary(
@@ -579,10 +818,16 @@ class _IoMailService implements MailService {
       date: message.decodeDate(),
       isSeen: message.isSeen,
       hasAttachments: message.hasAttachments(),
+      folder: folder,
+      mailboxUidValidity: mailboxUidValidity,
     );
   }
 
-  MailMessageDetail _toDetail(MimeMessage message) {
+  MailMessageDetail _toDetail(
+    MimeMessage message, {
+    required MailFolder folder,
+    required int? mailboxUidValidity,
+  }) {
     final recipients = _joinAddresses(message.to);
     final cc = _joinAddresses(message.cc);
     final plainText = _extractPlainText(message);
@@ -623,6 +868,8 @@ class _IoMailService implements MailService {
       isSeen: message.isSeen,
       attachments: attachments,
       messageId: message.getHeaderValue('Message-Id'),
+      mailboxUidValidity: mailboxUidValidity,
+      folder: folder,
     );
   }
 

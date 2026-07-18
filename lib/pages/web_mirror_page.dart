@@ -91,16 +91,27 @@ class _WebMirrorPageState extends State<WebMirrorPage> {
     }
     try {
       final fileName = _suggestedFileName(url, widget.title);
-      final downloadResult = await _nativeActionsChannel.invokeMethod<dynamic>(
-        'downloadFile',
-        {'url': url, 'filename': fileName, 'title': widget.title},
-      );
+      final (cookieHeader, cookieOrigin) = await _loadCookieHeader(url);
+      final downloadResult = await _nativeActionsChannel
+          .invokeMethod<dynamic>('downloadFile', {
+            'url': url,
+            'filename': fileName,
+            'title': widget.title,
+            if (cookieHeader.isNotEmpty) 'cookieHeader': cookieHeader,
+            if (cookieOrigin.isNotEmpty) 'cookieOrigin': cookieOrigin,
+          });
       if (!mounted) {
         return;
       }
+      final completedName = downloadedFileDisplayName(
+        downloadResult,
+        fallback: fileName,
+      );
       final message =
           downloadResult is String && downloadResult.trim().isNotEmpty
-          ? '下载完成：$fileName'
+          ? completedName.isEmpty
+                ? '下载完成。'
+                : '下载完成：$completedName'
           : '已加入下载任务。';
       ScaffoldMessenger.of(
         context,
@@ -211,10 +222,7 @@ class _WebMirrorPageState extends State<WebMirrorPage> {
     if (normalizedTitle.isNotEmpty && normalizedTitle.contains('.')) {
       return normalizedTitle;
     }
-    if (normalizedTitle.isNotEmpty) {
-      return '$normalizedTitle.pdf';
-    }
-    return 'download-${DateTime.now().millisecondsSinceEpoch}.bin';
+    return '';
   }
 }
 

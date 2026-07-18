@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:ispace_timeline/services/native_actions.dart';
@@ -58,6 +60,32 @@ void main() {
     expect(received?.arguments, isNull);
   });
 
+  group('downloadedFileDisplayName', () {
+    test('uses the native path basename when available', () {
+      expect(
+        downloadedFileDisplayName(
+          '/Documents/report-1234.pdf',
+          fallback: 'report.pdf',
+        ),
+        'report-1234.pdf',
+      );
+    });
+
+    test('keeps the fallback for content URIs and queued downloads', () {
+      expect(
+        downloadedFileDisplayName(
+          'content://media/external/downloads/42',
+          fallback: 'report.pdf',
+        ),
+        'report.pdf',
+      );
+      expect(
+        downloadedFileDisplayName(42, fallback: 'report.pdf'),
+        'report.pdf',
+      );
+    });
+  });
+
   group('safeAttachmentFileName', () {
     test('removes path traversal components', () {
       expect(safeAttachmentFileName('../../secret.txt'), 'secret.txt');
@@ -75,32 +103,60 @@ void main() {
   });
 
   group('mailAttachmentCacheFileName', () {
-    test('includes the message and reversible part identity', () {
-      expect(
-        mailAttachmentCacheFileName(
-          messageUid: 42,
-          partId: '2.1',
-          originalName: 'report.pdf',
-        ),
-        '42_Mi4x_report.pdf',
+    String buildName({
+      String accountId = 'student@mail.example.edu',
+      String mailbox = 'inbox',
+      int messageUid = 42,
+      String partId = '2.1',
+      String originalName = 'report.pdf',
+      String? messageId = '<message@example.edu>',
+      int? mailboxUidValidity = 1234,
+    }) {
+      return mailAttachmentCacheFileName(
+        accountId: accountId,
+        mailbox: mailbox,
+        messageId: messageId,
+        mailboxUidValidity: mailboxUidValidity,
+        messageUid: messageUid,
+        partId: partId,
+        originalName: originalName,
       );
+    }
+
+    test('keeps the display name without exposing account identity', () {
+      final fileName = buildName();
+
+      expect(fileName, endsWith('_report.pdf'));
+      expect(fileName, isNot(contains('student')));
+      expect(fileName, isNot(contains('example.edu')));
+    });
+
+    test('scopes identical UIDs by account, mailbox, message, and part', () {
+      final original = buildName();
+
+      expect(buildName(accountId: 'other@mail.example.edu'), isNot(original));
+      expect(buildName(mailbox: 'sent'), isNot(original));
+      expect(buildName(mailboxUidValidity: 5678), isNot(original));
+      expect(buildName(messageId: '<other@example.edu>'), isNot(original));
+      expect(buildName(partId: '2.2'), isNot(original));
     });
 
     test('keeps sanitization collisions in separate cache files', () {
-      final first = mailAttachmentCacheFileName(
-        messageUid: 42,
-        partId: '2.1',
-        originalName: 'report?.pdf',
-      );
-      final second = mailAttachmentCacheFileName(
-        messageUid: 42,
-        partId: '2.2',
-        originalName: 'report*.pdf',
-      );
+      final first = buildName(originalName: 'report?.pdf');
+      final second = buildName(partId: '2.2', originalName: 'report*.pdf');
 
       expect(first, isNot(second));
       expect(first, endsWith('report_.pdf'));
       expect(second, endsWith('report_.pdf'));
+    });
+
+    test('limits the complete UTF-8 file name length', () {
+      final fileName = buildName(
+        originalName: '${List.filled(80, '课程资料').join()}.pdf',
+      );
+
+      expect(utf8.encode(fileName).length, lessThanOrEqualTo(240));
+      expect(fileName, endsWith('.pdf'));
     });
   });
 

@@ -32,6 +32,10 @@ migrate_working_dir/
 .pub-cache/
 .pub/
 /build/
+/_site/
+*.apk
+*.aab
+*.ipa
 
 # Symbolication related
 app.*.symbols
@@ -46,8 +50,12 @@ app.*.map.json
 /android/key.properties
 /android/*.jks
 /android/*.keystore
+*.p8
+*.cer
 *.p12
 *.mobileprovision
+*.provisionprofile
+.fvm/
 
 # Android Studio will place build artifacts here
 /android/build/

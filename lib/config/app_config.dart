@@ -1,9 +1,4 @@
 abstract final class AppConfig {
-  static const String environment = String.fromEnvironment(
-    'APP_ENV',
-    defaultValue: 'production',
-  );
-
   static const String ispaceBaseUrl = String.fromEnvironment(
     'ISPACE_BASE_URL',
     defaultValue: 'https://ispace.uic.edu.cn',
@@ -61,6 +56,59 @@ abstract final class AppConfig {
 
   static String normalizedBaseUrl(String value) {
     return value.trim().replaceFirst(RegExp(r'/+$'), '');
+  }
+
+  static String normalizedHttpsBaseUrl(
+    String value, {
+    required String settingName,
+  }) {
+    final normalized = normalizedBaseUrl(value);
+    final uri = Uri.tryParse(normalized);
+    final schemeSeparator = normalized.indexOf('://');
+    final authorityStart = schemeSeparator < 0
+        ? normalized.length
+        : schemeSeparator + 3;
+    var authorityEnd = normalized.length;
+    for (final delimiter in ['/', '?', '#']) {
+      final index = normalized.indexOf(delimiter, authorityStart);
+      if (index >= 0 && index < authorityEnd) {
+        authorityEnd = index;
+      }
+    }
+    final rawAuthority = normalized.substring(authorityStart, authorityEnd);
+    if (uri == null ||
+        uri.scheme.toLowerCase() != 'https' ||
+        !uri.hasAuthority ||
+        uri.host.isEmpty ||
+        uri.userInfo.isNotEmpty ||
+        rawAuthority.contains('@') ||
+        normalized.contains('?') ||
+        normalized.contains('#') ||
+        uri.hasQuery ||
+        uri.hasFragment) {
+      throw FormatException(
+        '$settingName 必须是没有用户信息、查询参数或片段的有效 HTTPS Base URL。',
+      );
+    }
+    return normalized;
+  }
+
+  static String normalizedMailHost(
+    String value, {
+    required String settingName,
+  }) {
+    final normalized = value.trim().toLowerCase();
+    final uri = Uri.tryParse('https://$normalized');
+    if (normalized.isEmpty ||
+        uri == null ||
+        uri.host != normalized ||
+        uri.hasPort ||
+        uri.path.isNotEmpty ||
+        uri.query.isNotEmpty ||
+        uri.fragment.isNotEmpty) {
+      throw FormatException('$settingName 必须是有效的邮件服务器主机名。');
+    }
+    return normalized;
   }
 
   static String normalizedCookieDomain(String value) {
