@@ -348,6 +348,23 @@ class _DelayedSearchMailService extends _MockMailService {
 
 Widget _wrapInApp(Widget child) => MaterialApp(home: child);
 
+Future<void> _waitForRealAsync(
+  WidgetTester tester,
+  FutureOr<bool> Function() condition, {
+  String reason = 'The asynchronous operation did not complete.',
+}) async {
+  final completed = await tester.runAsync<bool>(() async {
+    final deadline = DateTime.now().add(const Duration(seconds: 5));
+    while (!await condition()) {
+      if (DateTime.now().isAfter(deadline)) return false;
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+    }
+    return true;
+  });
+  expect(completed, isTrue, reason: reason);
+  await tester.pump();
+}
+
 MailMessageSummary _makeSummary({
   required int uid,
   String subject = 'Test Subject',
@@ -1371,12 +1388,16 @@ void main() {
       );
 
       // Mock the native_actions channel
+      final openedPaths = <String>[];
       TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
           .setMockMethodCallHandler(
             const MethodChannel('ispace/native_actions'),
             (call) async {
               if (call.method == 'getMailAttachmentCacheDir') {
                 return cacheDirectory.path;
+              }
+              if (call.method == 'openFile') {
+                openedPaths.add((call.arguments as Map)['path'] as String);
               }
               return null;
             },
@@ -1406,7 +1427,12 @@ void main() {
 
       // Tap the attachment chip (find by filename text)
       await tester.tap(find.text('document.pdf'));
-      await tester.pumpAndSettle();
+      await tester.pump();
+      await _waitForRealAsync(
+        tester,
+        () => openedPaths.isNotEmpty,
+        reason: 'The downloaded attachment should be opened.',
+      );
 
       expect(
         svc.downloadedPartIds,
@@ -1492,7 +1518,12 @@ void main() {
       await tester.tap(find.text('Cached Attachment'));
       await tester.pumpAndSettle();
       await tester.tap(find.text('cached.pdf'));
-      await tester.pumpAndSettle();
+      await tester.pump();
+      await _waitForRealAsync(
+        tester,
+        () => openedPaths.isNotEmpty,
+        reason: 'The cached attachment should be opened.',
+      );
 
       expect(svc.downloadedPartIds, isEmpty);
       expect(openedPaths, [cacheFile.path]);
@@ -1507,7 +1538,7 @@ void main() {
       addTearDown(() => cacheDirectory.delete(recursive: true));
       final msg = _makeSummary(uid: 4, subject: 'Delayed Attachment');
       final svc = _DelayedAttachmentMailService(inbox: [msg]);
-      svc.readMessageOverride = (_) => const MailMessageDetail(
+      const detail = MailMessageDetail(
         uid: 4,
         subject: 'Delayed Attachment',
         sender: 'sender@example.com',
@@ -1527,7 +1558,18 @@ void main() {
           ),
         ],
       );
+      svc.readMessageOverride = (_) => detail;
       final openedPaths = <String>[];
+      final cacheFileName = mailAttachmentCacheFileName(
+        accountId: _creds().emailAddress,
+        mailbox: MailFolder.inbox.name,
+        messageId: detail.messageId,
+        mailboxUidValidity: detail.mailboxUidValidity,
+        messageUid: detail.uid,
+        partId: '2.1',
+        originalName: 'delayed.pdf',
+      );
+      final cachedFile = File('${cacheDirectory.path}/$cacheFileName');
       TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
           .setMockMethodCallHandler(
             const MethodChannel('ispace/native_actions'),
@@ -1563,12 +1605,21 @@ void main() {
       await tester.pumpAndSettle();
       await tester.tap(find.text('delayed.pdf'));
       await tester.pump();
+      await _waitForRealAsync(
+        tester,
+        () => svc.downloadedPartIds.isNotEmpty,
+        reason: 'The attachment download should start.',
+      );
       expect(svc.downloadedPartIds, ['2.1']);
 
       await tester.tap(find.byTooltip('回复'));
       await tester.pumpAndSettle();
       svc.completeDownload([1, 2, 3]);
-      await tester.pumpAndSettle();
+      await _waitForRealAsync(
+        tester,
+        cachedFile.exists,
+        reason: 'The completed attachment should be published to the cache.',
+      );
 
       expect(find.text('回复'), findsOneWidget);
       expect(openedPaths, isEmpty);

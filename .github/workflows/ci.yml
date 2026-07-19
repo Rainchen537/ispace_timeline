@@ -69,14 +69,16 @@ jobs:
           flutter-version: 3.32.6
           channel: stable
           cache: true
+      - uses: ruby/setup-ruby@003a5c4d8d6321bd302e38f6f0ec593f77f06600 # v1
+        with:
+          ruby-version: '3.3.6'
       - name: Resolve locked dependencies
         run: flutter pub get --enforce-lockfile
-      - name: Pin CocoaPods
+      - name: Pin CocoaPods toolchain
         shell: bash
         run: |
-          if [[ "$(pod --version 2>/dev/null || true)" != "1.16.2" ]]; then
-            sudo gem install cocoapods -v 1.16.2
-          fi
+          gem install cocoapods -v 1.16.2 --no-document
+          test "$(ruby -rjson -e 'print JSON::VERSION')" = "2.7.2"
           test "$(pod --version)" = "1.16.2"
       - name: Build iOS without code signing
         run: flutter build ios --debug --no-codesign
