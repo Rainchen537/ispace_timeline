@@ -1,5 +1,4 @@
 import 'dart:async';
-import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -8,6 +7,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import 'package:ispace_timeline/models/mail_models.dart';
 import 'package:ispace_timeline/pages/mail_page.dart';
+import 'package:ispace_timeline/services/mail_attachment_store.dart';
 import 'package:ispace_timeline/services/mail_service.dart';
 import 'package:ispace_timeline/services/native_actions.dart';
 
@@ -296,6 +296,18 @@ class _DelayedAttachmentMailService extends _MockMailService {
   }
 }
 
+class _FakeMailAttachmentStore implements MailAttachmentStore {
+  final Set<String> files = {};
+
+  @override
+  Future<bool> exists(String path) async => files.contains(path);
+
+  @override
+  Future<void> publish({required String path, required List<int> bytes}) async {
+    files.add(path);
+  }
+}
+
 class _DelayedDraftMailService extends _MockMailService {
   final Completer<MailDraftIdentity?> _saveCompleter =
       Completer<MailDraftIdentity?>();
@@ -347,25 +359,6 @@ class _DelayedSearchMailService extends _MockMailService {
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
 Widget _wrapInApp(Widget child) => MaterialApp(home: child);
-
-Future<void> _waitForRealAsync(
-  WidgetTester tester,
-  FutureOr<bool> Function() condition, {
-  VoidCallback? start,
-  String reason = 'The asynchronous operation did not complete.',
-}) async {
-  final completed = await tester.runAsync<bool>(() async {
-    start?.call();
-    final deadline = DateTime.now().add(const Duration(seconds: 5));
-    while (!await condition()) {
-      if (DateTime.now().isAfter(deadline)) return false;
-      await Future<void>.delayed(const Duration(milliseconds: 10));
-    }
-    return true;
-  });
-  expect(completed, isTrue, reason: reason);
-  await tester.pump();
-}
 
 MailMessageSummary _makeSummary({
   required int uid,
@@ -1363,10 +1356,8 @@ void main() {
     testWidgets('tapping attachment chip calls downloadAttachment', (
       tester,
     ) async {
-      final cacheDirectory = await Directory.systemTemp.createTemp(
-        'ispace-mail-download-',
-      );
-      addTearDown(() => cacheDirectory.delete(recursive: true));
+      const cacheDirectoryPath = '/mail-cache/download';
+      final attachmentStore = _FakeMailAttachmentStore();
       final msg = _makeSummary(uid: 2, subject: 'Attachment Email');
       final svc = _MockMailService(inbox: [msg]);
       svc.readMessageOverride = (uid) => const MailMessageDetail(
@@ -1396,7 +1387,7 @@ void main() {
             const MethodChannel('ispace/native_actions'),
             (call) async {
               if (call.method == 'getMailAttachmentCacheDir') {
-                return cacheDirectory.path;
+                return cacheDirectoryPath;
               }
               if (call.method == 'openFile') {
                 openedPaths.add((call.arguments as Map)['path'] as String);
@@ -1418,6 +1409,7 @@ void main() {
             controller: null,
             mailService: svc,
             testCredentials: _creds(),
+            attachmentStore: attachmentStore,
           ),
         ),
       );
@@ -1427,36 +1419,23 @@ void main() {
       await tester.tap(find.text('Attachment Email'));
       await tester.pumpAndSettle();
 
-      // Invoke the attachment tap inside runAsync so real file I/O can finish.
-      final attachmentGesture = tester.widget<GestureDetector>(
-        find
-            .ancestor(
-              of: find.text('document.pdf'),
-              matching: find.byType(GestureDetector),
-            )
-            .first,
-      );
-      await _waitForRealAsync(
-        tester,
-        () => openedPaths.isNotEmpty,
-        start: attachmentGesture.onTap,
-        reason: 'The downloaded attachment should be opened.',
-      );
+      await tester.tap(find.text('document.pdf'));
+      await tester.pumpAndSettle();
 
       expect(
         svc.downloadedPartIds,
         contains('2'),
         reason: 'downloadAttachment should have been called with partId=2',
       );
+      expect(openedPaths, hasLength(1));
+      expect(attachmentStore.files, contains(openedPaths.single));
     });
 
     testWidgets('cached attachment opens without another mail download', (
       tester,
     ) async {
-      final cacheDirectory = await Directory.systemTemp.createTemp(
-        'ispace-mail-cache-',
-      );
-      addTearDown(() => cacheDirectory.delete(recursive: true));
+      const cacheDirectoryPath = '/mail-cache/cached';
+      final attachmentStore = _FakeMailAttachmentStore();
       final msg = _makeSummary(uid: 3, subject: 'Cached Attachment');
       final svc = _MockMailService(inbox: [msg]);
       const detail = MailMessageDetail(
@@ -1490,15 +1469,15 @@ void main() {
         partId: '2.1',
         originalName: 'cached.pdf',
       );
-      final cacheFile = File('${cacheDirectory.path}/$cacheFileName');
-      await cacheFile.writeAsBytes([1, 2, 3]);
+      final cacheFilePath = '$cacheDirectoryPath/$cacheFileName';
+      attachmentStore.files.add(cacheFilePath);
       final openedPaths = <String>[];
       TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
           .setMockMethodCallHandler(
             const MethodChannel('ispace/native_actions'),
             (call) async {
               if (call.method == 'getMailAttachmentCacheDir') {
-                return cacheDirectory.path;
+                return cacheDirectoryPath;
               }
               if (call.method == 'openFile') {
                 openedPaths.add((call.arguments as Map)['path'] as String);
@@ -1520,38 +1499,25 @@ void main() {
             controller: null,
             mailService: svc,
             testCredentials: _creds(),
+            attachmentStore: attachmentStore,
           ),
         ),
       );
       await tester.pump();
       await tester.tap(find.text('Cached Attachment'));
       await tester.pumpAndSettle();
-      final attachmentGesture = tester.widget<GestureDetector>(
-        find
-            .ancestor(
-              of: find.text('cached.pdf'),
-              matching: find.byType(GestureDetector),
-            )
-            .first,
-      );
-      await _waitForRealAsync(
-        tester,
-        () => openedPaths.isNotEmpty,
-        start: attachmentGesture.onTap,
-        reason: 'The cached attachment should be opened.',
-      );
+      await tester.tap(find.text('cached.pdf'));
+      await tester.pumpAndSettle();
 
       expect(svc.downloadedPartIds, isEmpty);
-      expect(openedPaths, [cacheFile.path]);
+      expect(openedPaths, [cacheFilePath]);
     });
 
     testWidgets('attachment completion does not open over compose page', (
       tester,
     ) async {
-      final cacheDirectory = await Directory.systemTemp.createTemp(
-        'ispace-mail-route-',
-      );
-      addTearDown(() => cacheDirectory.delete(recursive: true));
+      const cacheDirectoryPath = '/mail-cache/route';
+      final attachmentStore = _FakeMailAttachmentStore();
       final msg = _makeSummary(uid: 4, subject: 'Delayed Attachment');
       final svc = _DelayedAttachmentMailService(inbox: [msg]);
       const detail = MailMessageDetail(
@@ -1585,13 +1551,13 @@ void main() {
         partId: '2.1',
         originalName: 'delayed.pdf',
       );
-      final cachedFile = File('${cacheDirectory.path}/$cacheFileName');
+      final cachedFilePath = '$cacheDirectoryPath/$cacheFileName';
       TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
           .setMockMethodCallHandler(
             const MethodChannel('ispace/native_actions'),
             (call) async {
               if (call.method == 'getMailAttachmentCacheDir') {
-                return cacheDirectory.path;
+                return cacheDirectoryPath;
               }
               if (call.method == 'openFile') {
                 openedPaths.add((call.arguments as Map)['path'] as String);
@@ -1613,38 +1579,25 @@ void main() {
             controller: null,
             mailService: svc,
             testCredentials: _creds(),
+            attachmentStore: attachmentStore,
           ),
         ),
       );
       await tester.pump();
       await tester.tap(find.text('Delayed Attachment'));
       await tester.pumpAndSettle();
-      final attachmentGesture = tester.widget<GestureDetector>(
-        find
-            .ancestor(
-              of: find.text('delayed.pdf'),
-              matching: find.byType(GestureDetector),
-            )
-            .first,
-      );
-      await _waitForRealAsync(
-        tester,
-        () => svc.downloadedPartIds.isNotEmpty,
-        start: attachmentGesture.onTap,
-        reason: 'The attachment download should start.',
-      );
+      await tester.tap(find.text('delayed.pdf'));
+      await tester.pump();
+      await tester.pump();
       expect(svc.downloadedPartIds, ['2.1']);
 
       await tester.tap(find.byTooltip('回复'));
       await tester.pumpAndSettle();
-      await _waitForRealAsync(
-        tester,
-        cachedFile.exists,
-        start: () => svc.completeDownload([1, 2, 3]),
-        reason: 'The completed attachment should be published to the cache.',
-      );
+      svc.completeDownload([1, 2, 3]);
+      await tester.pumpAndSettle();
 
       expect(find.text('回复'), findsOneWidget);
+      expect(attachmentStore.files, contains(cachedFilePath));
       expect(openedPaths, isEmpty);
     });
   });

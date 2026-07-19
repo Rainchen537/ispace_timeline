@@ -1,12 +1,11 @@
 import 'dart:async';
-import 'dart:io';
-import 'dart:math';
 
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 
 import '../config/app_config.dart';
 import '../models/mail_models.dart';
+import '../services/mail_attachment_store.dart';
 import '../services/mail_service.dart';
 import '../services/mail_service_factory.dart';
 import '../services/native_actions.dart';
@@ -18,7 +17,8 @@ import '../widgets/native_html_mail_view.dart';
 class MailPage extends StatefulWidget {
   const MailPage({super.key, required this.controller})
     : _mailService = null,
-      _testCredentials = null;
+      _testCredentials = null,
+      _attachmentStore = null;
 
   /// Test-only constructor that injects a mock service and fake credentials.
   @visibleForTesting
@@ -27,12 +27,15 @@ class MailPage extends StatefulWidget {
     required this.controller,
     required MailService mailService,
     required MailAccessCredentials? testCredentials,
+    MailAttachmentStore? attachmentStore,
   }) : _mailService = mailService,
-       _testCredentials = testCredentials;
+       _testCredentials = testCredentials,
+       _attachmentStore = attachmentStore;
 
   final AppSessionController? controller;
   final MailService? _mailService;
   final MailAccessCredentials? _testCredentials;
+  final MailAttachmentStore? _attachmentStore;
 
   @override
   State<MailPage> createState() => _MailPageState();
@@ -41,6 +44,8 @@ class MailPage extends StatefulWidget {
 class _MailPageState extends State<MailPage> {
   late final MailService _mailService =
       widget._mailService ?? createMailService();
+  late final MailAttachmentStore _attachmentStore =
+      widget._attachmentStore ?? const IoMailAttachmentStore();
   final TextEditingController _searchController = TextEditingController();
   final TextEditingController _senderController = TextEditingController();
   final TextEditingController _recipientController = TextEditingController();
@@ -394,6 +399,7 @@ class _MailPageState extends State<MailPage> {
               onReply: () => _openComposePage(replyTo: detail),
               mailService: _mailService,
               credentials: credentials,
+              attachmentStore: _attachmentStore,
             ),
           ),
         );
@@ -1895,6 +1901,7 @@ class _MailDetailPage extends StatefulWidget {
     required this.onReply,
     required this.mailService,
     required this.credentials,
+    required this.attachmentStore,
   });
 
   final MailMessageDetail detail;
@@ -1902,6 +1909,7 @@ class _MailDetailPage extends StatefulWidget {
   final VoidCallback onReply;
   final MailService mailService;
   final MailAccessCredentials credentials;
+  final MailAttachmentStore attachmentStore;
 
   @override
   State<_MailDetailPage> createState() => _MailDetailPageState();
@@ -1930,8 +1938,8 @@ class _MailDetailPageState extends State<_MailDetailPage> {
         partId: partId,
         originalName: attachment.name,
       );
-      final file = File('$cacheDirPath/$fileName');
-      if (!await file.exists()) {
+      final filePath = '$cacheDirPath/$fileName';
+      if (!await widget.attachmentStore.exists(filePath)) {
         if (!_isCurrentRoute) return;
         final bytes = await widget.mailService.downloadAttachment(
           credentials: widget.credentials,
@@ -1940,27 +1948,12 @@ class _MailDetailPageState extends State<_MailDetailPage> {
           partId: partId,
           expectedMailboxUidValidity: widget.detail.mailboxUidValidity,
         );
-        final temporaryFile = File(
-          '$cacheDirPath/.${DateTime.now().microsecondsSinceEpoch}.'
-          '${Random.secure().nextInt(1 << 32)}.partial',
-        );
-        try {
-          await temporaryFile.writeAsBytes(bytes, flush: true);
-          try {
-            await temporaryFile.rename(file.path);
-          } on FileSystemException {
-            if (!await file.exists()) rethrow;
-          }
-        } finally {
-          if (await temporaryFile.exists()) {
-            await temporaryFile.delete();
-          }
-        }
+        await widget.attachmentStore.publish(path: filePath, bytes: bytes);
       }
       if (!_isCurrentRoute) return;
       final mimeType = attachment.mimeType.split(';').first.trim();
       await _nativeActions.openFile(
-        path: file.path,
+        path: filePath,
         mimeType: mimeType.isEmpty ? '*/*' : mimeType,
       );
     } catch (error) {
