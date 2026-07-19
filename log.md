@@ -31,6 +31,8 @@
 - 发布身份恢复为历史连续值：Android `applicationId` 为 `com.example.ispace_timeline`、代码 `namespace` 为 `com.rainchen537.handsbnbu`；iOS Bundle ID 为 `com.example.ispaceTimeline`，对应 App Store ID `6760137657`；版本更新为 `1.1.1+2026071901`；
 - Google Play/upload signing lineage 无法从仓库和公开资料独立验证，正式发布前仍需发布负责人核对现有证书与 Play App Signing 记录；
 - GitHub Actions 第三方 action 固定到 immutable commit SHA，并禁止 checkout 持久化仓库凭据；locked dependency resolution、Android unsigned release gate、CocoaPods 1.16.2 和 lockfile stability 均纳入 CI；Android/iOS job 会在解析前快照 lockfile，并通过 `if: always()` 在前序失败后仍执行比较；
+- iOS `Podfile.lock` 的本地 podspec checksum 漂移最终定位为 Ruby 版本差异，而非依赖版本变化；仓库新增 `.ruby-version` 固定 Ruby 3.3.6，CI 同时固定 CocoaPods 1.16.2，并在该工具链下重新生成 checksum；
+- 邮件附件文件系统操作抽象为 `MailAttachmentStore`：生产实现继续使用唯一短 `.partial`、flush、原子 rename 和失败清理，Widget 测试注入内存实现，真实文件发布由独立单元测试覆盖，避免 Flutter fake async 与真实文件 I/O 组合导致测试超时；
 - Android release 签名门禁改为检查 Gradle task graph，`assemble`、`bundle`、`package`、`sign`、`validateSigning` 及聚合 `build` 无法在缺少 release keystore 时绕过；
 - `tool/check.sh` 在执行前后比较 lockfile 快照，不再把已有的有意 lockfile 修改误判为依赖解析漂移；
 - `.gitignore` 补充 Android 直接 Gradle 构建目录，APK、签名文件、本地 dart define 和临时依赖缓存均不纳入版本控制。
@@ -38,13 +40,14 @@
 ### 本地验证
 
 - `dart format lib test`：成功，46 个 Dart 文件均符合格式；
-- 邮箱串行化、UIDVALIDITY 与配置校验增量完成后，`flutter analyze` 为 `No issues found!`，完整 `flutter test` 为 `+81: All tests passed!`；随后增加的严格草稿 APPENDUID 身份传递、附件 MIME part 延迟获取、磁盘缓存命中和非当前路由防误打开均已由最终 Android/iOS 编译覆盖，并增加对应 Widget 回归测试，最终测试结果以本次推送后的 GitHub Actions 为准；
+- 邮箱串行化、UIDVALIDITY 与配置校验增量完成后，`flutter analyze` 为 `No issues found!`，完整 `flutter test` 为 `+81: All tests passed!`；随后增加的严格草稿 APPENDUID 身份传递、附件 MIME part 延迟获取、磁盘缓存命中、非当前路由防误打开和附件存储抽象均已增加回归测试，最终完整回归由 GitHub Actions 运行 `29668157829` 确认通过；
 - Android：最终工作树执行 `flutter build apk --debug` 成功，Gradle `assembleDebug` 耗时 8.2s；生成 APK 仅为本地构建产物，未纳入 Git；
 - iOS：最终工作树执行 `flutter build ios --debug --no-codesign` 成功，Xcode 构建耗时 10.5s；后续附件增量执行 `flutter build ios --simulator --debug` 也成功，最终耗时 10.8s；
 - Android release 门禁：执行 release 构建时在缺少 `android/key.properties` 的环境按预期以 `Release signing is not configured` 和退出码 1 拒绝构建；
 - iPhone 16e（iOS 26.2）模拟器成功安装并启动最终构建，登录页、安全存储/退出清除凭据说明和非官方客户端说明正常显示；截图证据仅保存在仓库外且未纳入 Git；
 - 未使用真实学校账号执行 Mail IMAP、真实 HTML 邮件、附件打开、认证下载、logout 清理及 MIS/Portal SSO 的端到端验证；自动化测试禁止使用真实账号；
-- 此前 GitHub Actions CI 运行 `29658287590` 和隐私政策 Pages 工作流 `29658323587` 已成功；它们早于本次最终安全增量，当前提交的 CI 和 Pages 结果将在推送后补记。
+- GitHub Actions CI 运行 `29668157829` 全部成功：locked dependency resolution、格式检查、静态分析、完整测试、Android debug APK、Android unsigned-release 门禁、iOS 无签名构建以及两端 lockfile stability 均通过；
+- 隐私政策 Pages 工作流 `29665463735` 成功，公开页面 `https://rainchen537.github.io/handsbnbu/` 已确认显示 2026 年 7 月 19 日更新内容，并说明邮件详情仅获取正文与附件结构、附件按 MIME part 延迟下载及安全缓存复用。
 
 ### 已知限制
 
