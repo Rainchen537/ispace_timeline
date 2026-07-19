@@ -51,7 +51,7 @@ jobs:
           grep -F "Release signing is not configured" release-gate.log
       - name: Verify lockfile stability
         if: always()
-        run: cmp "${RUNNER_TEMP}/pubspec.lock.before" pubspec.lock
+        run: diff -u "${RUNNER_TEMP}/pubspec.lock.before" pubspec.lock
 
   ios-build:
     runs-on: macos-14
@@ -83,5 +83,5 @@ jobs:
       - name: Verify lockfile stability
         if: always()
         run: |
-          cmp "${RUNNER_TEMP}/pubspec.lock.before" pubspec.lock
-          cmp "${RUNNER_TEMP}/Podfile.lock.before" ios/Podfile.lock
+          diff -u "${RUNNER_TEMP}/pubspec.lock.before" pubspec.lock
+          diff -u "${RUNNER_TEMP}/Podfile.lock.before" ios/Podfile.lock

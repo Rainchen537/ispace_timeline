@@ -1344,6 +1344,10 @@ void main() {
     testWidgets('tapping attachment chip calls downloadAttachment', (
       tester,
     ) async {
+      final cacheDirectory = await Directory.systemTemp.createTemp(
+        'ispace-mail-download-',
+      );
+      addTearDown(() => cacheDirectory.delete(recursive: true));
       final msg = _makeSummary(uid: 2, subject: 'Attachment Email');
       final svc = _MockMailService(inbox: [msg]);
       svc.readMessageOverride = (uid) => const MailMessageDetail(
@@ -1372,11 +1376,18 @@ void main() {
             const MethodChannel('ispace/native_actions'),
             (call) async {
               if (call.method == 'getMailAttachmentCacheDir') {
-                return Directory.systemTemp.path;
+                return cacheDirectory.path;
               }
               return null;
             },
           );
+      addTearDown(
+        () => TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+            .setMockMethodCallHandler(
+              const MethodChannel('ispace/native_actions'),
+              null,
+            ),
+      );
 
       await tester.pumpWidget(
         _wrapInApp(
@@ -1395,21 +1406,13 @@ void main() {
 
       // Tap the attachment chip (find by filename text)
       await tester.tap(find.text('document.pdf'));
-      await tester.pump(); // start download
-      await tester.pump(); // complete download
+      await tester.pumpAndSettle();
 
       expect(
         svc.downloadedPartIds,
         contains('2'),
         reason: 'downloadAttachment should have been called with partId=2',
       );
-
-      // Cleanup mock
-      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
-          .setMockMethodCallHandler(
-            const MethodChannel('ispace/native_actions'),
-            null,
-          );
     });
 
     testWidgets('cached attachment opens without another mail download', (
@@ -1489,8 +1492,7 @@ void main() {
       await tester.tap(find.text('Cached Attachment'));
       await tester.pumpAndSettle();
       await tester.tap(find.text('cached.pdf'));
-      await tester.pump();
-      await tester.pump();
+      await tester.pumpAndSettle();
 
       expect(svc.downloadedPartIds, isEmpty);
       expect(openedPaths, [cacheFile.path]);
@@ -1566,8 +1568,7 @@ void main() {
       await tester.tap(find.byTooltip('回复'));
       await tester.pumpAndSettle();
       svc.completeDownload([1, 2, 3]);
-      await tester.pump();
-      await tester.pump(const Duration(milliseconds: 100));
+      await tester.pumpAndSettle();
 
       expect(find.text('回复'), findsOneWidget);
       expect(openedPaths, isEmpty);
