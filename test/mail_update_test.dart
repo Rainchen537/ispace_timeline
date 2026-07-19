@@ -351,9 +351,11 @@ Widget _wrapInApp(Widget child) => MaterialApp(home: child);
 Future<void> _waitForRealAsync(
   WidgetTester tester,
   FutureOr<bool> Function() condition, {
+  VoidCallback? start,
   String reason = 'The asynchronous operation did not complete.',
 }) async {
   final completed = await tester.runAsync<bool>(() async {
+    start?.call();
     final deadline = DateTime.now().add(const Duration(seconds: 5));
     while (!await condition()) {
       if (DateTime.now().isAfter(deadline)) return false;
@@ -1425,12 +1427,19 @@ void main() {
       await tester.tap(find.text('Attachment Email'));
       await tester.pumpAndSettle();
 
-      // Tap the attachment chip (find by filename text)
-      await tester.tap(find.text('document.pdf'));
-      await tester.pump();
+      // Invoke the attachment tap inside runAsync so real file I/O can finish.
+      final attachmentGesture = tester.widget<GestureDetector>(
+        find
+            .ancestor(
+              of: find.text('document.pdf'),
+              matching: find.byType(GestureDetector),
+            )
+            .first,
+      );
       await _waitForRealAsync(
         tester,
         () => openedPaths.isNotEmpty,
+        start: attachmentGesture.onTap,
         reason: 'The downloaded attachment should be opened.',
       );
 
@@ -1517,11 +1526,18 @@ void main() {
       await tester.pump();
       await tester.tap(find.text('Cached Attachment'));
       await tester.pumpAndSettle();
-      await tester.tap(find.text('cached.pdf'));
-      await tester.pump();
+      final attachmentGesture = tester.widget<GestureDetector>(
+        find
+            .ancestor(
+              of: find.text('cached.pdf'),
+              matching: find.byType(GestureDetector),
+            )
+            .first,
+      );
       await _waitForRealAsync(
         tester,
         () => openedPaths.isNotEmpty,
+        start: attachmentGesture.onTap,
         reason: 'The cached attachment should be opened.',
       );
 
@@ -1603,21 +1619,28 @@ void main() {
       await tester.pump();
       await tester.tap(find.text('Delayed Attachment'));
       await tester.pumpAndSettle();
-      await tester.tap(find.text('delayed.pdf'));
-      await tester.pump();
+      final attachmentGesture = tester.widget<GestureDetector>(
+        find
+            .ancestor(
+              of: find.text('delayed.pdf'),
+              matching: find.byType(GestureDetector),
+            )
+            .first,
+      );
       await _waitForRealAsync(
         tester,
         () => svc.downloadedPartIds.isNotEmpty,
+        start: attachmentGesture.onTap,
         reason: 'The attachment download should start.',
       );
       expect(svc.downloadedPartIds, ['2.1']);
 
       await tester.tap(find.byTooltip('回复'));
       await tester.pumpAndSettle();
-      svc.completeDownload([1, 2, 3]);
       await _waitForRealAsync(
         tester,
         cachedFile.exists,
+        start: () => svc.completeDownload([1, 2, 3]),
         reason: 'The completed attachment should be published to the cache.',
       );
 

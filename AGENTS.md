@@ -19,9 +19,10 @@
 - Flutter：3.32.6 stable，见 `.fvmrc`；
 - Dart：3.8.1；
 - Java：17，见 `.java-version`；
+- Ruby：3.3.6，见 `.ruby-version`；
 - Android：compileSdk/targetSdk 35，minSdk 23；
 - iOS：最低 12.0；
-- CocoaPods：以 `ios/Podfile.lock` 中记录的版本为准，当前为 1.16.2。
+- CocoaPods：1.16.2。iOS 依赖操作必须使用仓库固定的 Ruby 与 CocoaPods 版本；Ruby 版本会影响本地 podspec 的 `SPEC CHECKSUMS`，不得用其他 Ruby 版本重写 `ios/Podfile.lock`。
 
 优先使用 FVM：
 
